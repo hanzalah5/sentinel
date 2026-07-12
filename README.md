@@ -1,5 +1,8 @@
 # Sentinel
 
+[![CI](https://github.com/hanzalah5/sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/hanzalah5/sentinel/actions/workflows/ci.yml)
+&nbsp;[![License: MIT](https://img.shields.io/badge/License-MIT-informational.svg)](LICENSE)
+
 **An agentic incident-response and root-cause copilot.** Sentinel ingests a production
 alert, investigates it the way a senior SRE would — correlating the signals, forming a
 ranked, evidence-backed root-cause hypothesis — and (in later iterations) proposes a
