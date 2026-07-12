@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "structlog>=24.4",
+    "redis>=5.0",
 ]
 
 [dependency-groups]
@@ -25,6 +26,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
     "httpx>=0.27",
+    "fakeredis>=2.21",
 ]
 
 [build-system]
@@ -55,7 +57,12 @@ mypy_path = "src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["langgraph.*", "langchain_google_genai.*", "langfuse.*"]
+module = [
+    "langgraph.*",
+    "langchain_google_genai.*",
+    "langfuse.*",
+    "fakeredis.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

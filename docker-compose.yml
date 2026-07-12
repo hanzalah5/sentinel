@@ -1,5 +1,5 @@
-# Iteration 1: the walking skeleton runs as a single app container.
-# Datastores (Redis, Postgres) are introduced in the iterations that first use them.
+# Iteration 2: the synchronous API (app) plus an event-driven ingestion worker
+# consuming alerts from Redis Streams.
 services:
   app:
     build: .
@@ -16,4 +16,30 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["uv", "run", "--no-dev", "python", "-m", "sentinel.ingestion.worker"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      JSON_LOGS: "true"
+      # Override the localhost default so the worker reaches the redis service.
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped

@@ -9,9 +9,12 @@ The engineering point of this project is **not** "an LLM that talks about incide
 It is a production-grade agent *system*: typed at every boundary, traced end to end,
 evaluated in CI, and scoped deliberately.
 
-> **Status: Iteration 1 — the traced walking skeleton.** One alert in over HTTP → a
-> single-node LangGraph agent → Gemini structured output → a typed `RootCauseHypothesis`
-> out, fully traced and correlation-logged, with lint/type/test gates in CI.
+> **Status: Iteration 2 — event-driven ingestion.** Alerts arrive on a Redis Stream and
+> are consumed by a worker with **at-least-once** delivery, bounded retries, and a
+> **dead-letter stream** — feeding the same traced, single-node LangGraph agent that the
+> HTTP endpoint uses. A synthetic-incident generator replays realistic alerts onto the
+> stream. (Iteration 1 delivered the traced walking skeleton: HTTP → agent → Gemini
+> structured output → typed `RootCauseHypothesis`, with lint/type/test gates in CI.)
 
 ---
 
@@ -57,6 +60,7 @@ evaluated in CI, and scoped deliberately.
 | LLM | Google Gemini via `langchain-google-genai` |
 | Type-safe I/O | Pydantic v2 + structured output |
 | API | FastAPI |
+| Ingestion | Redis Streams — consumer groups, at-least-once, dead-letter queue |
 | Observability | Langfuse (v3) + structured `structlog` logs, shared correlation ID |
 | Tooling | `uv`, `ruff`, `mypy --strict`, `pytest` |
 | Packaging / deploy | Docker + Docker Compose |
@@ -107,10 +111,28 @@ curl -s -X POST http://localhost:8000/investigate \
 
 Interactive API docs at `http://localhost:8000/docs`.
 
+### Ingestion pipeline (event-driven path)
+
+Instead of calling `/investigate` directly, alerts can flow through Redis Streams:
+
+```bash
+# Terminal 1 — start Redis + the app + the consumer worker
+docker compose up --build
+
+# Terminal 2 — replay synthetic incidents onto the stream
+uv run python -m sentinel.ingestion.generator --count 20 --rate 2 --seed 42
+# (or: make seed)
+```
+
+The worker consumes each alert, runs an investigation, and ACKs only on success.
+Failed alerts are retried; alerts that fail repeatedly (or can't be parsed) land in the
+dead-letter stream `sentinel:alerts:dlq`. To run the worker outside Docker (needs a
+reachable `REDIS_URL` and `GOOGLE_API_KEY`): `make worker`.
+
 ### Docker
 
 ```bash
-docker compose up --build      # builds the image and serves on :8000
+docker compose up --build      # redis + app (:8000) + ingestion worker
 ```
 
 ---
@@ -135,8 +157,9 @@ All settings load from the environment or a local `.env` (see `.env.example`).
 Scope is a feature. Iteration 1 ships one complete, instrumented slice; everything below
 is intentionally deferred to the iteration that first *needs* it (infra included).
 
-- [ ] **Iteration 2 — Ingestion:** Redis Streams alert queue + a replayable synthetic
-      incident generator (backpressure, at-least-once).
+- [x] **Iteration 2 — Ingestion:** Redis Streams alert queue + a replayable synthetic
+      incident generator, consumed with at-least-once delivery, bounded retries, and a
+      dead-letter stream.
 - [ ] **Iteration 3 — Runbook RAG:** Postgres + pgvector retrieval to ground hypotheses
       in real runbooks.
 - [ ] **Iteration 4 — Durable HITL:** LangGraph checkpointer + `interrupt()`; remediation
@@ -161,8 +184,12 @@ src/sentinel/
   agent/
     state.py        # typed graph state
     graph.py        # the LangGraph investigation graph
+  ingestion/
+    streams.py      # AlertStream: Redis Streams + consumer-group wrapper
+    worker.py       # IngestionWorker: at-least-once consume, retry, dead-letter
+    generator.py    # synthetic-incident generator CLI
   api/
     middleware.py   # CorrelationIdMiddleware
     app.py          # FastAPI factory, lifespan, endpoints
-tests/              # offline suite (fake model), keyless
+tests/              # offline suite (fake model + fakeredis), keyless
 ```

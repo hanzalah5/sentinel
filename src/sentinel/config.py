@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     langfuse_secret_key: str | None = None
     langfuse_host: str = "https://cloud.langfuse.com"
 
+    # --- Ingestion (Redis Streams) ---
+    redis_url: str = "redis://localhost:6379/0"
+    alert_stream: str = "sentinel:alerts"
+    consumer_group: str = "sentinel-workers"
+    consumer_name: str = "worker-1"
+    dead_letter_stream: str = "sentinel:alerts:dlq"
+    max_delivery_attempts: int = 3
+    stream_block_ms: int = 5000
+    stream_batch_count: int = 10
+    reclaim_idle_ms: int = 30000
+
     @property
     def llm_configured(self) -> bool:
         """True when a Gemini API key is available and the agent can run."""
