@@ -16,6 +16,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "structlog>=24.4",
     "redis>=5.0",
+    "psycopg[binary]>=3.2",
 ]
 
 [dependency-groups]

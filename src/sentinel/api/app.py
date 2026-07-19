@@ -16,6 +16,7 @@ from sentinel.contracts import Alert, HealthStatus, InvestigationResult
 from sentinel.llm import get_chat_model
 from sentinel.logging import configure_logging
 from sentinel.observability import configure_langfuse, get_langfuse_handler
+from sentinel.rag.store import build_retriever
 from sentinel.service import InvestigationService
 
 logger = structlog.get_logger(__name__)
@@ -24,7 +25,8 @@ logger = structlog.get_logger(__name__)
 def build_service(settings: Settings) -> InvestigationService:
     """Assemble the real (Gemini-backed) investigation service."""
     model = get_chat_model(settings)
-    graph = build_graph(model)
+    retriever = build_retriever(settings)
+    graph = build_graph(model, retriever, top_k=settings.runbook_top_k)
     handler = get_langfuse_handler(settings)
     return InvestigationService(graph=graph, settings=settings, langfuse_handler=handler)
 
@@ -45,7 +47,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:  # pragma: no cover - defensive startup guard
             logger.error("service.init_failed", error=str(exc))
     if app.state.service is None:
-        logger.warning("service.unavailable", reason="GOOGLE_API_KEY not configured")
+        reason = (
+            "GOOGLE_API_KEY not configured"
+            if not settings.llm_configured
+            else "service initialization failed"
+        )
+        logger.warning("service.unavailable", reason=reason)
 
     yield
 

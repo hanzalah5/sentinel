@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import cast
 
 import fakeredis.aioredis
 import pytest
@@ -25,9 +27,11 @@ class RecordingService:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.received: list[tuple[str, str | None]] = []
 
     def investigate(self, alert: Alert, correlation_id: str | None = None) -> InvestigationResult:
         self.calls.append(alert.alert_id)
+        self.received.append((alert.alert_id, correlation_id))
         return InvestigationResult(
             alert_id=alert.alert_id,
             correlation_id=correlation_id or "x",
@@ -128,6 +132,11 @@ async def test_poison_message_goes_to_dead_letter(
     assert service.calls == []
     dlq = await redis_client.xrange("t:dlq")
     assert dlq is not None and len(dlq) == 1
+    # The dead-letter entry must preserve the raw payload and failure context.
+    fields = cast("dict[str, str]", dlq[0][1])
+    assert fields["alert"] == "not-valid-json"
+    assert fields["error"].startswith("validation_error")
+    assert fields["source_stream"] == "t:alerts"
     assert await stream.pending(10, 0) == []
 
 
@@ -149,3 +158,40 @@ async def test_failing_investigation_dead_letters_after_max_attempts(
     dlq = await redis_client.xrange("t:dlq")
     assert dlq is not None and len(dlq) == 1
     assert await stream.pending(10, 0) == []
+
+
+async def test_worker_threads_message_id_as_correlation_id(
+    redis_client: fakeredis.aioredis.FakeRedis,
+) -> None:
+    stream = _stream(redis_client)
+    await stream.ensure_group()
+    service = RecordingService()
+
+    message_id = await stream.publish(_alert("corr-1"))
+    await _worker(stream, service).run_once()
+
+    # The Redis message id is threaded through as the correlation id.
+    assert service.received == [("corr-1", message_id)]
+
+
+async def test_run_processes_then_stops_on_event(
+    redis_client: fakeredis.aioredis.FakeRedis,
+) -> None:
+    stream = _stream(redis_client)
+    await stream.ensure_group()
+    service = RecordingService()
+    worker = _worker(stream, service)
+    await stream.publish(_alert("run-1"))
+
+    stop = asyncio.Event()
+
+    async def stopper() -> None:
+        for _ in range(100):
+            if service.calls:
+                break
+            await asyncio.sleep(0.01)
+        stop.set()
+
+    await asyncio.gather(worker.run(stop), stopper())
+
+    assert service.calls == ["run-1"]

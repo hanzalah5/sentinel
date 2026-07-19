@@ -83,6 +83,10 @@ class RootCauseHypothesis(BaseModel):
     recommended_next_step: str = Field(
         description="A single safe next diagnostic or mitigation action."
     )
+    runbook_references: list[str] = Field(
+        default_factory=list,
+        description="Titles of the runbooks the analysis relied on, if any.",
+    )
 
 
 class InvestigationResult(BaseModel):

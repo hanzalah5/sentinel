@@ -140,6 +140,7 @@ async def _amain(count: int, rate: float, seed: int | None) -> None:
         group=settings.consumer_group,
         consumer=settings.consumer_name,
         dead_letter_stream=settings.dead_letter_stream,
+        maxlen=settings.stream_maxlen,
     )
     interval = 1.0 / rate if rate > 0 else 0.0
     try:

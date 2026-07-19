@@ -11,7 +11,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from sentinel.config import Settings
 from sentinel.contracts import Alert, InvestigationResult
-from sentinel.logging import get_correlation_id, new_correlation_id
+from sentinel.logging import get_correlation_id, new_correlation_id, set_correlation_id
 
 logger = structlog.get_logger(__name__)
 
@@ -32,6 +32,9 @@ class InvestigationService:
     def investigate(self, alert: Alert, correlation_id: str | None = None) -> InvestigationResult:
         """Run the agent over an alert and return a structured, traceable result."""
         cid = correlation_id or get_correlation_id() or new_correlation_id()
+        # Bind for callers that don't set it themselves (e.g. the ingestion worker),
+        # so every log line from this investigation carries the same id as the trace.
+        set_correlation_id(cid)
 
         config: RunnableConfig = {
             "run_name": "incident-investigation",

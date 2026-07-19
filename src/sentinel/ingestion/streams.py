@@ -31,6 +31,7 @@ class AlertStream:
         group: str,
         consumer: str,
         dead_letter_stream: str,
+        maxlen: int | None = None,
     ) -> None:
         # redis-py types every reply as ``bytes | str`` because it can't see the
         # runtime ``decode_responses=True``; treat the client as untyped internally
@@ -40,6 +41,8 @@ class AlertStream:
         self._group = group
         self._consumer = consumer
         self._dlq = dead_letter_stream
+        # Approximate cap so both streams stay bounded (None = no trimming).
+        self._maxlen = maxlen or None
 
     async def ensure_group(self) -> None:
         """Create the consumer group (and stream) if it does not already exist.
@@ -56,7 +59,12 @@ class AlertStream:
 
     async def publish(self, alert: Alert) -> str:
         """Append an alert to the stream; returns the new message ID."""
-        message_id: str = await self._redis.xadd(self._stream, {"alert": alert.model_dump_json()})
+        message_id: str = await self._redis.xadd(
+            self._stream,
+            {"alert": alert.model_dump_json()},
+            maxlen=self._maxlen,
+            approximate=True,
+        )
         return message_id
 
     async def read_new(self, count: int, block_ms: int) -> list[StreamMessage]:
@@ -115,5 +123,7 @@ class AlertStream:
                 "source_id": message_id,
                 "source_stream": self._stream,
             },
+            maxlen=self._maxlen,
+            approximate=True,
         )
         logger.warning("stream.dead_lettered", message_id=message_id, error=error)

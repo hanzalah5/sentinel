@@ -12,33 +12,37 @@ The engineering point of this project is **not** "an LLM that talks about incide
 It is a production-grade agent *system*: typed at every boundary, traced end to end,
 evaluated in CI, and scoped deliberately.
 
-> **Status: Iteration 2 — event-driven ingestion.** Alerts arrive on a Redis Stream and
-> are consumed by a worker with **at-least-once** delivery, bounded retries, and a
-> **dead-letter stream** — feeding the same traced, single-node LangGraph agent that the
-> HTTP endpoint uses. A synthetic-incident generator replays realistic alerts onto the
-> stream. (Iteration 1 delivered the traced walking skeleton: HTTP → agent → Gemini
-> structured output → typed `RootCauseHypothesis`, with lint/type/test gates in CI.)
+> **Status: Iteration 3 — runbook-grounded retrieval (RAG).** Before forming a
+> hypothesis, the agent retrieves relevant runbooks from **Postgres + pgvector** and
+> grounds its analysis in them, citing the ones it used. Retrieval **degrades
+> gracefully** — with no database configured, or on a lookup error, the agent still
+> answers (just ungrounded), so CI stays keyless and earlier behaviour is preserved.
+> (Earlier: Iteration 1 = traced walking skeleton; Iteration 2 = event-driven Redis
+> Streams ingestion with at-least-once delivery + dead-letter queue.)
 
 ---
 
-## Architecture (Iteration 1)
+## Architecture
+
+Alerts reach the agent two ways — synchronously via `POST /investigate`, or
+asynchronously off a Redis Stream consumed by the ingestion worker. Both drive the same
+graph:
 
 ```
-                         ┌─────────────────────────────────────────────┐
-   POST /investigate     │                FastAPI app                   │
-  (Alert JSON) ────────► │  CorrelationIdMiddleware → typed endpoint    │
-                         │            │                                 │
-                         │            ▼                                 │
-                         │   InvestigationService                       │
-                         │            │  (correlation id + Langfuse cb) │
-                         │            ▼                                 │
-                         │   LangGraph: [triage_and_hypothesize]        │
-                         │            │                                 │
-                         │            ▼                                 │
-                         │   Gemini .with_structured_output(...)        │
-                         └────────────┼─────────────────────────────────┘
-                                      ▼
-                     RootCauseHypothesis (validated)  ──►  Langfuse trace
+   POST /investigate ─┐                        ┌─ Redis Stream (alerts)
+   (Alert JSON)       │                        │      │  ingestion worker
+                      ▼                        ▼      ▼  (at-least-once + DLQ)
+                 ┌───────────────────────────────────────────────┐
+                 │              InvestigationService              │
+                 │        (correlation id + Langfuse trace)       │
+                 │                      │                         │
+                 │   LangGraph:  retrieve_runbooks ──► triage     │
+                 │                  │                     │       │
+                 │     Postgres + pgvector          Gemini        │
+                 │     (top-k runbooks)     .with_structured_output│
+                 └──────────────────────┼────────────────────────┘
+                                        ▼
+                      RootCauseHypothesis (validated, cites runbooks)
 ```
 
 **Design choices that matter here**
@@ -52,6 +56,9 @@ evaluated in CI, and scoped deliberately.
   `/readyz` only passes when the agent is actually wired (Gemini key present).
 - **A provider seam.** The agent depends on a `BaseChatModel` from a `get_chat_model()`
   factory — a later iteration swaps in cost/latency-aware routing without touching the graph.
+- **Grounded, and degradable.** Retrieval is behind a `RunbookRetriever` protocol; the
+  real one uses pgvector, but with no DB configured (or on a lookup error) it falls back
+  to a no-op and the agent still answers. RAG never becomes a hard dependency.
 
 ---
 
@@ -59,8 +66,9 @@ evaluated in CI, and scoped deliberately.
 
 | Concern | Choice |
 |---|---|
-| Orchestration | LangGraph (single node today, room to grow) |
+| Orchestration | LangGraph (`retrieve_runbooks` → `triage_and_hypothesize`) |
 | LLM | Google Gemini via `langchain-google-genai` |
+| Retrieval (RAG) | Runbook grounding via Postgres + **pgvector** (cosine, HNSW), Gemini embeddings |
 | Type-safe I/O | Pydantic v2 + structured output |
 | API | FastAPI |
 | Ingestion | Redis Streams — consumer groups, at-least-once, dead-letter queue |
@@ -132,10 +140,28 @@ Failed alerts are retried; alerts that fail repeatedly (or can't be parsed) land
 dead-letter stream `sentinel:alerts:dlq`. To run the worker outside Docker (needs a
 reachable `REDIS_URL` and `GOOGLE_API_KEY`): `make worker`.
 
+### Runbook retrieval (RAG)
+
+To ground hypotheses in runbooks, point `DATABASE_URL` at Postgres+pgvector and ingest
+the `runbooks/` corpus once:
+
+```bash
+# docker compose brings up a pgvector-enabled Postgres alongside the app/worker
+docker compose up --build
+
+# embed the runbooks into pgvector (needs DATABASE_URL + GOOGLE_API_KEY)
+uv run python -m sentinel.rag.ingest --path runbooks
+# (or: make ingest)
+```
+
+After ingest, `/investigate` responses include `runbook_references` naming the runbooks
+the analysis used. Leave `DATABASE_URL` unset to disable retrieval entirely — the agent
+still runs, ungrounded.
+
 ### Docker
 
 ```bash
-docker compose up --build      # redis + app (:8000) + ingestion worker
+docker compose up --build   # postgres (pgvector) + redis + app (:8000) + worker
 ```
 
 ---
@@ -150,7 +176,10 @@ All settings load from the environment or a local `.env` (see `.env.example`).
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Model id. |
 | `LLM_TEMPERATURE` | `0.1` | Sampling temperature. |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | Enable tracing when both are set. |
-| `LANGFUSE_HOST` | `https://cloud.langfuse.com` | Langfuse endpoint. |
+| `LANGFUSE_HOST` | `https://cloud.langfuse.com` | Langfuse endpoint (use the US host if that's your region). |
+| `DATABASE_URL` | — | Postgres+pgvector DSN. Unset = retrieval disabled (agent still runs). |
+| `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `gemini-embedding-001` / `768` | Embeddings for runbook retrieval. |
+| `RUNBOOK_TOP_K` | `3` | Number of runbooks retrieved per alert. |
 | `LOG_LEVEL` / `JSON_LOGS` | `INFO` / `true` | Logging. |
 
 ---
@@ -163,8 +192,9 @@ is intentionally deferred to the iteration that first *needs* it (infra included
 - [x] **Iteration 2 — Ingestion:** Redis Streams alert queue + a replayable synthetic
       incident generator, consumed with at-least-once delivery, bounded retries, and a
       dead-letter stream.
-- [ ] **Iteration 3 — Runbook RAG:** Postgres + pgvector retrieval to ground hypotheses
-      in real runbooks.
+- [x] **Iteration 3 — Runbook RAG:** Postgres + pgvector retrieval grounds hypotheses in
+      curated runbooks (cosine + HNSW, Gemini embeddings), behind a retriever protocol
+      that degrades gracefully when no DB is configured.
 - [ ] **Iteration 4 — Durable HITL:** LangGraph checkpointer + `interrupt()`; remediation
       pauses for human approval and resumes on decision.
 - [ ] **Iteration 5 — Eval-as-CI:** a labelled incident set scoring root-cause accuracy,
@@ -186,7 +216,12 @@ src/sentinel/
   service.py        # InvestigationService: run graph, package result
   agent/
     state.py        # typed graph state
-    graph.py        # the LangGraph investigation graph
+    graph.py        # the LangGraph investigation graph (retrieve → triage)
+  rag/
+    runbooks.py     # RunbookMatch, RunbookRetriever protocol, NullRetriever
+    embeddings.py   # get_embeddings() provider seam (Gemini)
+    store.py        # pgvector store + retriever (hand-rolled SQL) + build_retriever
+    ingest.py       # embed the runbooks/ corpus into pgvector (CLI)
   ingestion/
     streams.py      # AlertStream: Redis Streams + consumer-group wrapper
     worker.py       # IngestionWorker: at-least-once consume, retry, dead-letter
@@ -194,5 +229,6 @@ src/sentinel/
   api/
     middleware.py   # CorrelationIdMiddleware
     app.py          # FastAPI factory, lifespan, endpoints
-tests/              # offline suite (fake model + fakeredis), keyless
+runbooks/           # curated markdown runbooks (the RAG corpus)
+tests/              # offline suite (fake model + fakeredis + fake retriever), keyless
 ```

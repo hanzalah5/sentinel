@@ -1,4 +1,4 @@
-.PHONY: install lint format typecheck test check run worker seed up down
+.PHONY: install lint format typecheck test check run worker seed ingest up down
 
 install:
 	uv sync
@@ -25,6 +25,9 @@ worker:
 
 seed:
 	uv run python -m sentinel.ingestion.generator --count 10 --rate 1
+
+ingest:
+	uv run python -m sentinel.rag.ingest --path runbooks
 
 up:
 	docker compose up --build

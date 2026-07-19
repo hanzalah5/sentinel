@@ -4,9 +4,9 @@ Reliability model (at-least-once):
 - A message is ACKed only after its investigation succeeds.
 - A failed investigation is left pending and retried by ``reclaim_pending`` once it
   has been idle long enough.
-- A message that has been delivered more than ``max_delivery_attempts`` times, or that
-  cannot be parsed at all (a poison message), is moved to the dead-letter stream and
-  ACKed so it can never block the pipeline.
+- A message that has reached ``max_delivery_attempts`` deliveries, or that cannot be
+  parsed at all (a poison message), is moved to the dead-letter stream and ACKed so it
+  can never block the pipeline.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from sentinel.config import get_settings
 from sentinel.contracts import Alert, InvestigationResult
 from sentinel.ingestion.streams import AlertStream
+from sentinel.logging import set_correlation_id
 
 logger = structlog.get_logger(__name__)
 
@@ -44,6 +45,7 @@ class IngestionWorker:
         block_ms: int,
         reclaim_idle_ms: int,
         max_delivery_attempts: int,
+        error_backoff_seconds: float = 1.0,
     ) -> None:
         self._stream = stream
         self._service = service
@@ -51,9 +53,12 @@ class IngestionWorker:
         self._block_ms = block_ms
         self._reclaim_idle_ms = reclaim_idle_ms
         self._max_delivery_attempts = max_delivery_attempts
+        self._error_backoff_seconds = error_backoff_seconds
 
     async def process_message(self, message_id: str, fields: dict[str, str]) -> bool:
         """Process one message. Returns True on success (message ACKed)."""
+        # Bind the id so the worker's own logs (and the investigation's) are correlated.
+        set_correlation_id(message_id)
         raw = fields.get("alert", "")
         try:
             alert = Alert.model_validate_json(raw)
@@ -90,7 +95,7 @@ class IngestionWorker:
         for entry in await self._stream.pending(self._batch_count, self._reclaim_idle_ms):
             message_id = str(entry["message_id"])
             delivered = int(entry["times_delivered"])
-            if delivered > self._max_delivery_attempts:
+            if delivered >= self._max_delivery_attempts:
                 fields = await self._stream.fetch(message_id) or {}
                 await self._stream.to_dead_letter(
                     message_id,
@@ -115,7 +120,11 @@ class IngestionWorker:
         await self._stream.ensure_group()
         logger.info("ingestion.worker_started")
         while not stop_event.is_set():
-            await self.run_once()
+            try:
+                await self.run_once()
+            except Exception as exc:  # a transient Redis error must not kill the worker
+                logger.error("ingestion.loop_error", error=str(exc))
+                await asyncio.sleep(self._error_backoff_seconds)
         logger.info("ingestion.worker_stopped")
 
 
@@ -140,6 +149,7 @@ async def _amain() -> None:
         group=settings.consumer_group,
         consumer=settings.consumer_name,
         dead_letter_stream=settings.dead_letter_stream,
+        maxlen=settings.stream_maxlen,
     )
     worker = IngestionWorker(
         stream,

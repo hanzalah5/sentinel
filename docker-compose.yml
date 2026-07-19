@@ -1,5 +1,5 @@
-# Iteration 2: the synchronous API (app) plus an event-driven ingestion worker
-# consuming alerts from Redis Streams.
+# Iteration 3: API + ingestion worker + datastores (Redis for streaming,
+# Postgres/pgvector for runbook retrieval).
 services:
   app:
     build: .
@@ -10,6 +10,10 @@ services:
         required: false
     environment:
       JSON_LOGS: "true"
+      DATABASE_URL: "postgresql://sentinel:sentinel@postgres:5432/sentinel"
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 10s
@@ -29,6 +33,23 @@ services:
       retries: 5
     restart: unless-stopped
 
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel
+      POSTGRES_DB: sentinel
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
   worker:
     build: .
     command: ["uv", "run", "--no-dev", "python", "-m", "sentinel.ingestion.worker"]
@@ -37,9 +58,15 @@ services:
         required: false
     environment:
       JSON_LOGS: "true"
-      # Override the localhost default so the worker reaches the redis service.
+      # Override the localhost defaults so the worker reaches the sibling services.
       REDIS_URL: "redis://redis:6379/0"
+      DATABASE_URL: "postgresql://sentinel:sentinel@postgres:5432/sentinel"
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  pgdata:

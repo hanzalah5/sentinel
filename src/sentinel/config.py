@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     langfuse_secret_key: str | None = None
     langfuse_host: str = "https://cloud.langfuse.com"
 
+    # --- Runbook RAG (Postgres + pgvector) ---
+    database_url: str | None = None
+    # gemini-embedding-001 defaults to 3072 dims; we request 768 (Matryoshka
+    # truncation) to stay under pgvector's 2000-dim HNSW index limit.
+    embedding_model: str = "models/gemini-embedding-001"
+    # Bounded: pgvector's HNSW index rejects columns with more than 2000 dimensions.
+    embedding_dim: int = Field(default=768, ge=1, le=2000)
+    runbook_top_k: int = 3
+    db_connect_timeout_seconds: int = 5
+    db_statement_timeout_ms: int = 5000
+
     # --- Ingestion (Redis Streams) ---
     redis_url: str = "redis://localhost:6379/0"
     alert_stream: str = "sentinel:alerts"
@@ -49,6 +60,8 @@ class Settings(BaseSettings):
     stream_block_ms: int = 5000
     stream_batch_count: int = 10
     reclaim_idle_ms: int = 30000
+    # Approximate cap on stream length so Redis memory stays bounded (0 = unbounded).
+    stream_maxlen: int = 100_000
 
     @property
     def llm_configured(self) -> bool:
@@ -59,6 +72,11 @@ class Settings(BaseSettings):
     def langfuse_enabled(self) -> bool:
         """True when both Langfuse keys are present and tracing should be wired."""
         return bool(self.langfuse_public_key and self.langfuse_secret_key)
+
+    @property
+    def rag_enabled(self) -> bool:
+        """True when a database is configured and runbook retrieval should be wired."""
+        return bool(self.database_url)
 
 
 @lru_cache
