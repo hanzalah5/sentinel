@@ -12,13 +12,13 @@ The engineering point of this project is **not** "an LLM that talks about incide
 It is a production-grade agent *system*: typed at every boundary, traced end to end,
 evaluated in CI, and scoped deliberately.
 
-> **Status: Iteration 3 — runbook-grounded retrieval (RAG).** Before forming a
-> hypothesis, the agent retrieves relevant runbooks from **Postgres + pgvector** and
-> grounds its analysis in them, citing the ones it used. Retrieval **degrades
-> gracefully** — with no database configured, or on a lookup error, the agent still
-> answers (just ungrounded), so CI stays keyless and earlier behaviour is preserved.
-> (Earlier: Iteration 1 = traced walking skeleton; Iteration 2 = event-driven Redis
-> Streams ingestion with at-least-once delivery + dead-letter queue.)
+> **Status: Iteration 4 — durable human-in-the-loop remediation.** An incident now runs
+> investigate → **plan a remediation** → **pause for human approval** → execute. The
+> pause is a LangGraph `interrupt()` backed by a **checkpointer** (Postgres for true
+> cross-restart durability, in-memory for dev), so a paused incident survives a restart
+> and resumes on decision. Execution is **simulated** — the agent never touches real
+> infrastructure. (Earlier: I1 traced skeleton; I2 Redis Streams ingestion; I3 pgvector
+> runbook RAG.)
 
 ---
 
@@ -59,6 +59,20 @@ graph:
 - **Grounded, and degradable.** Retrieval is behind a `RunbookRetriever` protocol; the
   real one uses pgvector, but with no DB configured (or on a lookup error) it falls back
   to a no-op and the agent still answers. RAG never becomes a hard dependency.
+- **Durable human-in-the-loop.** The incident graph pauses at `interrupt()` for any
+  action above the auto-approve risk ceiling (default: *everything* needs approval). A
+  checkpointer persists the paused state, so approval can arrive minutes or a restart
+  later and resume exactly where it left off. Execution is behind a
+  `RemediationExecutor` protocol; the only shipped executor is a safe simulator.
+
+### Incident graph (Iteration 4)
+
+```
+retrieve_runbooks ─► triage ─► plan_remediation ─► request_approval ─approved─► execute ─► END
+                                                          │ interrupt()
+                                                          └─rejected──────────────────────► END
+   (compiled with a checkpointer: PostgresSaver when DATABASE_URL is set, else MemorySaver)
+```
 
 ---
 
@@ -71,6 +85,7 @@ graph:
 | Retrieval (RAG) | Runbook grounding via Postgres + **pgvector** (cosine, HNSW), Gemini embeddings |
 | Type-safe I/O | Pydantic v2 + structured output |
 | API | FastAPI |
+| Durable HITL | LangGraph `interrupt()` + checkpointer (PostgresSaver / MemorySaver), risk-tiered approval |
 | Ingestion | Redis Streams — consumer groups, at-least-once, dead-letter queue |
 | Observability | Langfuse (v3) + structured `structlog` logs, shared correlation ID |
 | Tooling | `uv`, `ruff`, `mypy --strict`, `pytest` |
@@ -158,6 +173,30 @@ After ingest, `/investigate` responses include `runbook_references` naming the r
 the analysis used. Leave `DATABASE_URL` unset to disable retrieval entirely — the agent
 still runs, ungrounded.
 
+### Incident lifecycle with human approval (HITL)
+
+The incident flow investigates, proposes a remediation, and **pauses for approval**:
+
+```bash
+# 1. Open an incident -> returns a thread_id and status "awaiting_approval"
+curl -s -X POST http://localhost:8000/incidents \
+  -H 'Content-Type: application/json' \
+  -d '{"alert_id":"inc-1","title":"5xx spike on payments-api",
+       "description":"5xx rose to 15% after deploy v4.1.0","severity":"critical",
+       "service":"payments-api","source":"prometheus","fired_at":"2026-07-13T09:31:00Z"}'
+
+# 2. Inspect the durable state any time
+curl -s http://localhost:8000/incidents/<thread_id>
+
+# 3. Approve (or reject) -> the paused graph resumes and executes (or skips)
+curl -s -X POST http://localhost:8000/incidents/<thread_id>/decision \
+  -H 'Content-Type: application/json' -d '{"decision":"approved"}'
+```
+
+With `DATABASE_URL` set, the pause is persisted in Postgres — restart the process between
+steps 1 and 3 and the incident still resumes correctly. Execution is simulated; no real
+infrastructure is touched.
+
 ### Docker
 
 ```bash
@@ -180,6 +219,7 @@ All settings load from the environment or a local `.env` (see `.env.example`).
 | `DATABASE_URL` | — | Postgres+pgvector DSN. Unset = retrieval disabled (agent still runs). |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `gemini-embedding-001` / `768` | Embeddings for runbook retrieval. |
 | `RUNBOOK_TOP_K` | `3` | Number of runbooks retrieved per alert. |
+| `HITL_AUTO_APPROVE_MAX_RISK` | `none` | Auto-approve actions up to this risk; `none` = always require approval. |
 | `LOG_LEVEL` / `JSON_LOGS` | `INFO` / `true` | Logging. |
 
 ---
@@ -195,8 +235,9 @@ is intentionally deferred to the iteration that first *needs* it (infra included
 - [x] **Iteration 3 — Runbook RAG:** Postgres + pgvector retrieval grounds hypotheses in
       curated runbooks (cosine + HNSW, Gemini embeddings), behind a retriever protocol
       that degrades gracefully when no DB is configured.
-- [ ] **Iteration 4 — Durable HITL:** LangGraph checkpointer + `interrupt()`; remediation
-      pauses for human approval and resumes on decision.
+- [x] **Iteration 4 — Durable HITL:** an incident plans a remediation, pauses at a
+      LangGraph `interrupt()` for human approval (state persisted by a checkpointer), and
+      resumes on decision; execution is behind a protocol with a simulated executor.
 - [ ] **Iteration 5 — Eval-as-CI:** a labelled incident set scoring root-cause accuracy,
       gating merges on regression.
 - [ ] **Iteration 6 — Cost routing & hardening:** cheap-model triage + frontier-model
@@ -210,13 +251,18 @@ is intentionally deferred to the iteration that first *needs* it (infra included
 src/sentinel/
   config.py         # pydantic-settings
   logging.py        # structlog + correlation-id contextvar
-  contracts.py      # Alert, RootCauseHypothesis, InvestigationResult, ...
+  contracts.py      # Alert, RootCauseHypothesis, RemediationAction, IncidentView, ...
   llm.py            # get_chat_model() provider seam (Gemini)
   observability.py  # Langfuse v3 client + LangChain callback handler
+  checkpointer.py   # build_checkpointer(): PostgresSaver / MemorySaver
   service.py        # InvestigationService: run graph, package result
+  incident.py       # IncidentService: durable start / decide / get over a thread_id
   agent/
     state.py        # typed graph state
     graph.py        # the LangGraph investigation graph (retrieve → triage)
+    incident_graph.py  # incident graph (… → plan → approve[interrupt] → execute)
+  remediation/
+    executor.py     # RemediationExecutor protocol + SimulatedExecutor (safe, dry-run)
   rag/
     runbooks.py     # RunbookMatch, RunbookRetriever protocol, NullRetriever
     embeddings.py   # get_embeddings() provider seam (Gemini)
@@ -232,3 +278,14 @@ src/sentinel/
 runbooks/           # curated markdown runbooks (the RAG corpus)
 tests/              # offline suite (fake model + fakeredis + fake retriever), keyless
 ```
+
+---
+
+## Known limitations
+
+- **Checkpoint serialization allow-list.** LangGraph persists incident state via msgpack
+  and currently warns when deserializing the project's own Pydantic types; a future
+  LangGraph will require registering them in an allow-list. It round-trips correctly
+  today — this is a forward-compat follow-up, not a current defect.
+- **Simulated execution only.** Remediations are never actually run; a real
+  `RemediationExecutor` is deliberately out of scope.

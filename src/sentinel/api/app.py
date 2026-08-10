@@ -10,13 +10,23 @@ import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 
 from sentinel.agent.graph import build_graph
+from sentinel.agent.incident_graph import build_incident_graph
 from sentinel.api.middleware import CorrelationIdMiddleware
+from sentinel.checkpointer import build_checkpointer
 from sentinel.config import Settings, get_settings
-from sentinel.contracts import Alert, HealthStatus, InvestigationResult
+from sentinel.contracts import (
+    Alert,
+    DecisionRequest,
+    HealthStatus,
+    IncidentView,
+    InvestigationResult,
+)
+from sentinel.incident import IncidentService
 from sentinel.llm import get_chat_model
 from sentinel.logging import configure_logging
 from sentinel.observability import configure_langfuse, get_langfuse_handler
 from sentinel.rag.store import build_retriever
+from sentinel.remediation.executor import SimulatedExecutor
 from sentinel.service import InvestigationService
 
 logger = structlog.get_logger(__name__)
@@ -29,6 +39,21 @@ def build_service(settings: Settings) -> InvestigationService:
     graph = build_graph(model, retriever, top_k=settings.runbook_top_k)
     handler = get_langfuse_handler(settings)
     return InvestigationService(graph=graph, settings=settings, langfuse_handler=handler)
+
+
+def build_incident_service(settings: Settings) -> IncidentService:
+    """Assemble the incident service: incident graph + durable checkpointer + executor."""
+    model = get_chat_model(settings)
+    graph = build_incident_graph(
+        model,
+        build_retriever(settings),
+        SimulatedExecutor(),
+        build_checkpointer(settings),
+        top_k=settings.runbook_top_k,
+        auto_approve_max_risk=settings.hitl_auto_approve_max_risk,
+    )
+    handler = get_langfuse_handler(settings)
+    return IncidentService(graph=graph, settings=settings, langfuse_handler=handler)
 
 
 @asynccontextmanager
@@ -54,6 +79,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         logger.warning("service.unavailable", reason=reason)
 
+    if app.state.incident_service is None and settings.llm_configured:
+        try:
+            app.state.incident_service = build_incident_service(settings)
+            logger.info("incident_service.ready")
+        except Exception as exc:  # pragma: no cover - defensive startup guard
+            logger.error("incident_service.init_failed", error=str(exc))
+
     yield
 
 
@@ -67,11 +99,22 @@ def get_service(request: Request) -> InvestigationService:
     return service
 
 
+def get_incident_service(request: Request) -> IncidentService:
+    service: IncidentService | None = request.app.state.incident_service
+    if service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Incident service unavailable; set GOOGLE_API_KEY.",
+        )
+    return service
+
+
 def create_app(
     settings: Settings | None = None,
     service: InvestigationService | None = None,
+    incident_service: IncidentService | None = None,
 ) -> FastAPI:
-    """Create the FastAPI app. Inject ``service`` to bypass real-LLM startup (tests)."""
+    """Create the FastAPI app. Inject services to bypass real-LLM startup (tests)."""
     settings = settings or get_settings()
 
     app = FastAPI(
@@ -82,6 +125,7 @@ def create_app(
     )
     app.state.settings = settings
     app.state.service = service
+    app.state.incident_service = incident_service
     app.add_middleware(CorrelationIdMiddleware)
 
     @app.get("/healthz", response_model=HealthStatus, tags=["ops"])
@@ -108,5 +152,40 @@ def create_app(
         """Investigate an alert and return a structured root-cause hypothesis."""
         correlation_id = getattr(request.state, "correlation_id", None)
         return service.investigate(alert, correlation_id=correlation_id)
+
+    @app.post("/incidents", response_model=IncidentView, tags=["incident"])
+    def create_incident(
+        alert: Alert,
+        service: Annotated[IncidentService, Depends(get_incident_service)],
+    ) -> IncidentView:
+        """Open an incident: investigate, plan a remediation, and pause for approval."""
+        return service.start(alert)
+
+    @app.post(
+        "/incidents/{thread_id}/decision",
+        response_model=IncidentView,
+        tags=["incident"],
+    )
+    def decide_incident(
+        thread_id: str,
+        body: DecisionRequest,
+        service: Annotated[IncidentService, Depends(get_incident_service)],
+    ) -> IncidentView:
+        """Approve or reject a paused incident's proposed remediation."""
+        view = service.decide(thread_id, body.decision)
+        if view is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown incident")
+        return view
+
+    @app.get("/incidents/{thread_id}", response_model=IncidentView, tags=["incident"])
+    def get_incident(
+        thread_id: str,
+        service: Annotated[IncidentService, Depends(get_incident_service)],
+    ) -> IncidentView:
+        """Report the current durable state of an incident."""
+        view = service.get(thread_id)
+        if view is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown incident")
+        return view
 
     return app

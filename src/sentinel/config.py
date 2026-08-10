@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     runbook_top_k: int = 3
     db_connect_timeout_seconds: int = 5
     db_statement_timeout_ms: int = 5000
+    db_pool_max_size: int = 5
+
+    # --- Human-in-the-loop remediation ---
+    # Actions at or below this risk auto-execute; anything riskier needs approval.
+    # Default "none" => every remediation requires human approval (safest). Set to
+    # "low"/"medium"/"high" to auto-approve up to that risk.
+    hitl_auto_approve_max_risk: str = "none"
 
     # --- Ingestion (Redis Streams) ---
     redis_url: str = "redis://localhost:6379/0"

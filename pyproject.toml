@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "langgraph>=0.2.60",
+    "langgraph-checkpoint-postgres>=2.0",
     "langchain>=0.3",
     "langchain-core>=0.3.30",
     "langchain-google-genai>=2.0.0",

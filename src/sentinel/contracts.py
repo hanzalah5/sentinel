@@ -104,3 +104,79 @@ class HealthStatus(BaseModel):
 
     status: str
     detail: str | None = None
+
+
+class ActionRisk(StrEnum):
+    """How risky/destructive a proposed remediation is."""
+
+    low = "low"
+    medium = "medium"
+    high = "high"
+
+
+class RemediationAction(BaseModel):
+    """A single concrete remediation the agent proposes for an incident."""
+
+    summary: str = Field(description="One-line description of the proposed remediation.")
+    command: str = Field(
+        description=(
+            "The concrete action or command to run, e.g. "
+            "'kubectl rollout undo deployment/checkout-api'."
+        )
+    )
+    risk: ActionRisk = Field(description="How risky/destructive the action is.")
+    rationale: str = Field(description="Why this action addresses the most likely root cause.")
+    requires_approval: bool = Field(
+        default=True,
+        description="Whether a human must approve before this action executes.",
+    )
+
+
+class ApprovalDecision(StrEnum):
+    """A human's decision on a proposed remediation."""
+
+    approved = "approved"
+    rejected = "rejected"
+
+
+class ExecutionOutcome(StrEnum):
+    """What happened to a remediation once the decision was made."""
+
+    executed = "executed"
+    skipped = "skipped"
+    failed = "failed"
+
+
+class ExecutionResult(BaseModel):
+    """The result of (not) executing a remediation."""
+
+    outcome: ExecutionOutcome
+    detail: str
+
+
+class IncidentStatus(StrEnum):
+    """Lifecycle status of an incident."""
+
+    awaiting_approval = "awaiting_approval"
+    executed = "executed"
+    rejected = "rejected"
+    failed = "failed"
+
+
+class IncidentView(BaseModel):
+    """The externally visible state of an incident (API response)."""
+
+    thread_id: str
+    status: IncidentStatus
+    alert_id: str
+    hypothesis: RootCauseHypothesis | None = None
+    remediation: RemediationAction | None = None
+    decision: ApprovalDecision | None = None
+    execution: ExecutionResult | None = None
+
+
+class DecisionRequest(BaseModel):
+    """Request body for approving or rejecting a proposed remediation."""
+
+    decision: ApprovalDecision
+    note: str | None = None
