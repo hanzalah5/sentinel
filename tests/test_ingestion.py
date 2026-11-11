@@ -195,3 +195,25 @@ async def test_run_processes_then_stops_on_event(
     await asyncio.gather(worker.run(stop), stopper())
 
     assert service.calls == ["run-1"]
+
+
+async def test_run_stops_promptly_when_reads_return_immediately(
+    redis_client: fakeredis.aioredis.FakeRedis,
+) -> None:
+    """The run loop must yield to the event loop even when reads never suspend.
+
+    fakeredis answers a blocking XREADGROUP on an empty stream without suspending. With
+    no yield point the loop starves every other task, including whatever sets the stop
+    event, and never exits. A real Redis connection always suspends on network I/O, so
+    this mostly affects test doubles, but shutdown must not depend on the client.
+    """
+    worker = _worker(_stream(redis_client), RecordingService())
+    stop = asyncio.Event()
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    await asyncio.gather(worker.run(stop), stop_soon())
+
+    assert stop.is_set()
