@@ -29,6 +29,7 @@ dev = [
     "pytest-cov>=6.0",
     "httpx>=0.27",
     "fakeredis>=2.21",
+    "pytest-timeout>=2.3",
 ]
 
 [build-system]
@@ -71,6 +72,13 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-q"
+# Fail a hung test fast instead of letting CI run until the job is killed.
+timeout = 30
 
 [tool.coverage.run]
 source = ["sentinel"]
+
+[tool.coverage.report]
+# Floor just under the current level, so coverage cannot quietly erode.
+fail_under = 80
+show_missing = true

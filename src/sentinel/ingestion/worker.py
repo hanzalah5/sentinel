@@ -125,6 +125,11 @@ class IngestionWorker:
             except Exception as exc:  # a transient Redis error must not kill the worker
                 logger.error("ingestion.loop_error", error=str(exc))
                 await asyncio.sleep(self._error_backoff_seconds)
+            # Yield to the event loop every iteration. If the Redis client answers
+            # without suspending (an empty stream with a client that doesn't truly
+            # block), this loop would otherwise never give other tasks, including the
+            # shutdown signal handler, a chance to run.
+            await asyncio.sleep(0)
         logger.info("ingestion.worker_stopped")
 
 
