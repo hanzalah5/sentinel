@@ -67,7 +67,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
     result_path = args.out / f"{split}-{stamp}.json"
     result_path.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
 
-    failures = check(report, load_baseline(args.gate)) if args.gate else None
+    if args.gate:
+        failures = check(report, load_baseline(args.gate))
+    else:
+        # No baseline yet: still refuse a run that mostly errored. Its scores say
+        # nothing about the agent, and a "passing" job would hide that.
+        failures = []
+        if report.metrics.error_rate > args.max_error_rate:
+            failures.append(
+                f"error rate {report.metrics.error_rate:.1%} is above the "
+                f"{args.max_error_rate:.1%} limit; scores from this run are not meaningful"
+            )
     markdown = render_markdown(report, failures)
     print(markdown)
     print(f"Full results: {result_path}")
@@ -94,6 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--concurrency", type=int, default=2)
     run.add_argument("--limit", type=int, default=0, help="only run the first N cases")
     run.add_argument("--gate", type=Path, default=None, help="baseline file to gate against")
+    run.add_argument(
+        "--max-error-rate",
+        type=float,
+        default=0.1,
+        help="fail the run above this error rate when no baseline is given (default 0.1)",
+    )
     run.set_defaults(handler=_cmd_run)
     return parser
 

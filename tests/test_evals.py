@@ -466,3 +466,22 @@ def test_cli_run_fails_when_the_gate_fails(tmp_path: Path, monkeypatch: pytest.M
 def test_cli_run_needs_an_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "get_settings", lambda: Settings(google_api_key=None, json_logs=False))
     assert cli.main(["run"]) == 2
+
+
+def test_cli_run_without_a_baseline_still_fails_when_most_cases_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression: a run where every model call 404'd must not pass just because no
+    baseline exists yet."""
+
+    def model_gone(alert: Alert) -> InvestigationOutcome:
+        raise RuntimeError("404 NOT_FOUND: model is no longer available")
+
+    monkeypatch.setattr(cli, "get_settings", _ready_settings)
+    monkeypatch.setattr(cli, "build_live_investigator", lambda settings: model_gone)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    code = cli.main(["run", "--dataset-dir", str(DATASETS), "--out", str(tmp_path), "--limit", "3"])
+
+    assert code == 1
+    assert "error rate 100.0% is above the 10.0% limit" in capsys.readouterr().out

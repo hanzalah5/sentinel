@@ -82,6 +82,18 @@ jobs:
         if: steps.key.outputs.present == 'true'
         run: uv sync --frozen
 
+      # Models get retired; when the configured one is gone every case errors. Listing
+      # what this key can call makes that diagnosable straight from the job log.
+      - name: Show the configured and available Gemini models
+        if: steps.key.outputs.present == 'true'
+        run: |
+          echo "Configured: $(uv run python -c 'from sentinel.config import get_settings; print(get_settings().gemini_model)')"
+          echo "Available (generateContent):"
+          curl -sSf -H "x-goog-api-key: ${GOOGLE_API_KEY}" \
+            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000" \
+            | jq -r '.models[] | select(.supportedGenerationMethods | index("generateContent")) | .name' \
+            | sed 's#^models/##' | grep '^gemini' | sort | paste -sd ' ' -
+
       - name: Ingest runbooks into pgvector
         if: steps.key.outputs.present == 'true'
         run: uv run python -m sentinel.rag.ingest --path runbooks
