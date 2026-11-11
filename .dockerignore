@@ -1,0 +1,31 @@
+# Keep the build context to what the image needs: pyproject.toml, uv.lock,
+# README.md (package metadata), src/ and runbooks/.
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+htmlcov
+dist
+build
+*.egg-info
+
+# Secrets and local config never enter the image.
+.env
+.env.*
+
+# Not needed at runtime.
+tests
+evals
+eval-results
+Makefile
+docker-compose.yml
+.pre-commit-config.yaml
+.idea
+.vscode
+.DS_Store
