@@ -89,8 +89,8 @@ retrieve_runbooks ─► triage ─► plan_remediation ─► request_approval 
 | Ingestion | Redis Streams — consumer groups, at-least-once, dead-letter queue |
 | Observability | Langfuse (v3) + structured `structlog` logs, shared correlation ID |
 | Tooling | `uv`, `ruff`, `mypy --strict`, `pytest` |
-| Packaging / deploy | Docker + Docker Compose |
-| CI | GitHub Actions: lint → format-check → type-check → test |
+| Packaging / deploy | Multi-stage Docker image (non-root, no build tooling, healthcheck) + Docker Compose |
+| CI | GitHub Actions: lint → format-check → type-check → test (Python 3.12 + 3.13); image build + container smoke test |
 
 ---
 
@@ -201,6 +201,17 @@ infrastructure is touched.
 
 ```bash
 docker compose up --build   # postgres (pgvector) + redis + app (:8000) + worker
+```
+
+The image is multi-stage: dependencies are installed from `uv.lock` in a build stage, and
+the runtime stage carries only the virtualenv and runbooks. It runs as an unprivileged
+user, listens on `$PORT` (default 8000, so platforms like Cloud Run can set it), has a
+`HEALTHCHECK` on `/healthz`, and runs uvicorn as PID 1 so `SIGTERM` triggers a graceful
+shutdown. CI builds the image and checks all of this on every push.
+
+```bash
+docker build -t sentinel .
+docker run --rm -p 8000:8000 --env-file .env sentinel
 ```
 
 ---
