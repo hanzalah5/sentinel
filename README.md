@@ -212,7 +212,7 @@ All settings load from the environment or a local `.env` (see `.env.example`).
 | Variable | Default | Purpose |
 |---|---|---|
 | `GOOGLE_API_KEY` | — | Gemini key. Without it, `/investigate` returns `503`. |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Model id. |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | Model id. Pin an exact version so eval results stay comparable. |
 | `LLM_TEMPERATURE` | `0.1` | Sampling temperature. |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | — | Enable tracing when both are set. |
 | `LANGFUSE_HOST` | `https://cloud.langfuse.com` | Langfuse endpoint (use the US host if that's your region). |

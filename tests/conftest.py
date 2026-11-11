@@ -51,7 +51,7 @@ def fake_structured_model() -> RunnableLambda[Any, RootCauseHypothesis]:
 def ready_settings() -> Settings:
     return Settings(
         google_api_key="test-key",
-        gemini_model="gemini-2.5-flash",
+        gemini_model="gemini-3.8-flash",
         json_logs=False,
         langfuse_public_key=None,
         langfuse_secret_key=None,
