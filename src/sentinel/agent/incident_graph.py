@@ -50,6 +50,8 @@ class IncidentState(TypedDict):
     hypothesis: RootCauseHypothesis | None
     remediation: RemediationAction | None
     decision: ApprovalDecision | None
+    decided_by: str | None
+    decision_note: str | None
     execution: ExecutionResult | None
 
 
@@ -140,13 +142,26 @@ def _coerce_decision(resumed: Any) -> ApprovalDecision:
     return ApprovalDecision.rejected
 
 
-def request_approval(state: IncidentState, config: RunnableConfig) -> dict[str, ApprovalDecision]:
+AUTO_APPROVER = "policy:auto-approve"
+
+
+def _resume_text(resumed: Any, key: str) -> str | None:
+    """A string field from a resume payload, or None (never raises)."""
+    value = resumed.get(key) if isinstance(resumed, dict) else None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def request_approval(state: IncidentState, config: RunnableConfig) -> dict[str, Any]:
     action = state["remediation"]
     if action is None:
         raise ValueError("no remediation to approve")
     if not action.requires_approval:
         logger.info("approval.auto", command=action.command, risk=action.risk.value)
-        return {"decision": ApprovalDecision.approved}
+        return {
+            "decision": ApprovalDecision.approved,
+            "decided_by": AUTO_APPROVER,
+            "decision_note": None,
+        }
     hypothesis = state["hypothesis"]
     resumed = interrupt(
         {
@@ -156,8 +171,18 @@ def request_approval(state: IncidentState, config: RunnableConfig) -> dict[str, 
         }
     )
     decision = _coerce_decision(resumed)
-    logger.info("approval.decided", decision=decision.value, command=action.command)
-    return {"decision": decision}
+    decided_by = _resume_text(resumed, "decided_by")
+    logger.info(
+        "approval.decided",
+        decision=decision.value,
+        decided_by=decided_by,
+        command=action.command,
+    )
+    return {
+        "decision": decision,
+        "decided_by": decided_by,
+        "decision_note": _resume_text(resumed, "note"),
+    }
 
 
 def _make_execute_node(executor: RemediationExecutor) -> Any:

@@ -2,10 +2,45 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_KEY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+MIN_API_KEY_LENGTH = 24
+
+
+def parse_api_keys(raw: str) -> dict[str, str]:
+    """Parse ``"name:key,name2:key2"`` into ``{name: key}``.
+
+    Raises ``ValueError`` on any malformed entry. Messages name the entry but never
+    include key material, so a misconfiguration can't leak a key into logs.
+    """
+    keys: dict[str, str] = {}
+    for position, entry in enumerate(raw.split(","), start=1):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, sep, key = entry.partition(":")
+        name = name.strip()
+        if not sep or not _KEY_NAME.fullmatch(name):
+            raise ValueError(
+                f"SENTINEL_API_KEYS entry {position} must be 'name:key' with a name of "
+                "letters, digits, '.', '_' or '-'"
+            )
+        if len(key) < MIN_API_KEY_LENGTH or any(ch.isspace() for ch in key):
+            raise ValueError(
+                f"SENTINEL_API_KEYS key for {name!r} must be at least {MIN_API_KEY_LENGTH} "
+                "characters with no whitespace"
+            )
+        if name in keys:
+            raise ValueError(f"SENTINEL_API_KEYS has a duplicate name {name!r}")
+        if key in keys.values():
+            raise ValueError(f"SENTINEL_API_KEYS reuses the same key for {name!r}")
+        keys[name] = key
+    return keys
 
 
 class Settings(BaseSettings):
@@ -56,6 +91,25 @@ class Settings(BaseSettings):
     # Default "none" => every remediation requires human approval (safest). Set to
     # "low"/"medium"/"high" to auto-approve up to that risk.
     hitl_auto_approve_max_risk: str = "none"
+
+    # --- API authentication ---
+    # Comma-separated "name:key" pairs. Callers send "Authorization: Bearer <key>"; the
+    # name identifies them in logs and on approval decisions. With no keys configured,
+    # protected endpoints refuse every request (fail closed).
+    sentinel_api_keys: SecretStr | None = None
+
+    @field_validator("sentinel_api_keys")
+    @classmethod
+    def _validate_api_keys(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None:
+            parse_api_keys(value.get_secret_value())  # fail fast at startup
+        return value
+
+    def api_keys(self) -> dict[str, str]:
+        """The configured API keys as ``{name: key}`` (empty if none)."""
+        if self.sentinel_api_keys is None:
+            return {}
+        return parse_api_keys(self.sentinel_api_keys.get_secret_value())
 
     # --- Ingestion (Redis Streams) ---
     redis_url: str = "redis://localhost:6379/0"

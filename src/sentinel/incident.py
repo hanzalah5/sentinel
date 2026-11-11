@@ -68,16 +68,34 @@ class IncidentService:
             raise RuntimeError("incident state missing immediately after start")
         return view
 
-    def decide(self, thread_id: str, decision: ApprovalDecision) -> IncidentView | None:
-        """Resume a paused incident with a decision. None if the thread is unknown."""
+    def decide(
+        self,
+        thread_id: str,
+        decision: ApprovalDecision,
+        *,
+        decided_by: str | None = None,
+        note: str | None = None,
+    ) -> IncidentView | None:
+        """Resume a paused incident with a decision. None if the thread is unknown.
+
+        ``decided_by`` and ``note`` are persisted with the decision in the checkpointed
+        state, so the audit trail survives restarts along with the incident itself.
+        """
         set_correlation_id(thread_id)
         snapshot = self._graph.get_state(self._config(thread_id))
         if not snapshot.values:
             return None
         if snapshot.next:  # still paused: resume it
-            logger.info("incident.decide", thread_id=thread_id, decision=decision.value)
+            logger.info(
+                "incident.decide",
+                thread_id=thread_id,
+                decision=decision.value,
+                decided_by=decided_by,
+            )
             self._graph.invoke(
-                Command(resume={"decision": decision.value}),
+                Command(
+                    resume={"decision": decision.value, "decided_by": decided_by, "note": note}
+                ),
                 config=self._config(thread_id),
             )
         return self._view_from_state(thread_id)
@@ -115,5 +133,7 @@ class IncidentService:
             hypothesis=values.get("hypothesis"),
             remediation=values.get("remediation"),
             decision=decision,
+            decided_by=values.get("decided_by"),
+            decision_note=values.get("decision_note"),
             execution=execution,
         )

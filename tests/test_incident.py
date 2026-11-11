@@ -32,6 +32,7 @@ from sentinel.contracts import (
 )
 from sentinel.incident import IncidentService
 from sentinel.rag.runbooks import NullRetriever
+from tests.conftest import AUTH_HEADERS, TEST_API_KEY
 
 _HYPOTHESIS = RootCauseHypothesis(
     summary="Post-deploy regression in checkout-api",
@@ -138,6 +139,8 @@ def test_low_risk_auto_executes_without_interrupt() -> None:
     assert view.status == IncidentStatus.executed
     assert view.remediation is not None and view.remediation.requires_approval is False
     assert executor.calls == [_LOW_RISK.command]
+    # Auto-approval is attributed to the policy, so the audit trail never has a gap.
+    assert view.decided_by == "policy:auto-approve"
 
 
 def test_get_reflects_state_and_unknown_is_none() -> None:
@@ -259,10 +262,11 @@ def incident_client() -> Iterator[TestClient]:
         json_logs=False,
         langfuse_public_key=None,
         langfuse_secret_key=None,
+        sentinel_api_keys=f"oncall-alice:{TEST_API_KEY}",
     )
     service = IncidentService(graph=graph, settings=settings)
     app = create_app(settings=settings, service=None, incident_service=service)
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=AUTH_HEADERS) as test_client:
         yield test_client
 
 
@@ -279,12 +283,17 @@ def test_incident_api_pause_then_approve(incident_client: TestClient) -> None:
     assert fetched.json()["status"] == "awaiting_approval"
 
     decided = incident_client.post(
-        f"/incidents/{thread_id}/decision", json={"decision": "approved"}
+        f"/incidents/{thread_id}/decision",
+        json={"decision": "approved", "note": "rollback window confirmed with #payments"},
     )
     assert decided.status_code == 200
     body = decided.json()
     assert body["status"] == "executed"
     assert body["execution"]["outcome"] == "executed"
+    # The audit trail: who decided (the API key's name, never the key) and why.
+    assert body["decided_by"] == "oncall-alice"
+    assert body["decision_note"] == "rollback window confirmed with #payments"
+    assert incident_client.get(f"/incidents/{thread_id}").json()["decided_by"] == "oncall-alice"
 
 
 def test_incident_api_decision_unknown_is_404(incident_client: TestClient) -> None:
@@ -298,8 +307,10 @@ def test_incidents_503_when_service_unavailable() -> None:
         json_logs=False,
         langfuse_public_key=None,
         langfuse_secret_key=None,
+        sentinel_api_keys=f"tester:{TEST_API_KEY}",
     )
     app = create_app(settings=settings, service=None, incident_service=None)
-    with TestClient(app) as client:
+    with TestClient(app, headers=AUTH_HEADERS) as client:
         response = client.post("/incidents", json=ALERT_PAYLOAD)
         assert response.status_code == 503
+        assert "Incident service unavailable" in response.json()["detail"]
