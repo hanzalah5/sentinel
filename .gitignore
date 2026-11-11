@@ -23,3 +23,6 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# Local eval output (published runs are committed under evals/results/)
+eval-results/

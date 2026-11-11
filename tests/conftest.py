@@ -16,7 +16,7 @@ from langchain_core.runnables import RunnableLambda
 from sentinel.agent.graph import build_graph_from_structured
 from sentinel.api.app import create_app
 from sentinel.config import Settings
-from sentinel.contracts import CandidateCause, RootCauseHypothesis
+from sentinel.contracts import CandidateCause, IncidentCategory, RootCauseHypothesis
 from sentinel.service import InvestigationService
 
 FIXED_HYPOTHESIS = RootCauseHypothesis(
@@ -24,6 +24,7 @@ FIXED_HYPOTHESIS = RootCauseHypothesis(
     candidate_causes=[
         CandidateCause(
             cause="Database connection pool exhaustion",
+            category=IncidentCategory.db_pool_saturation,
             confidence=0.72,
             evidence=[
                 "DB connection pool saturation warnings",
@@ -32,6 +33,7 @@ FIXED_HYPOTHESIS = RootCauseHypothesis(
         ),
         CandidateCause(
             cause="Slow downstream dependency",
+            category=IncidentCategory.dependency_failure,
             confidence=0.2,
             evidence=["latency rose while error rate stayed flat"],
         ),
