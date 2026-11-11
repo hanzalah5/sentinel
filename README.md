@@ -64,6 +64,10 @@ graph:
   checkpointer persists the paused state, so approval can arrive minutes or a restart
   later and resume exactly where it left off. Execution is behind a
   `RemediationExecutor` protocol; the only shipped executor is a safe simulator.
+- **Authenticated, attributable decisions.** Every endpoint except liveness/readiness
+  requires a bearer API key, compared in constant time against SHA-256 digests. With no
+  keys configured the API fails closed. Each approval or rejection records *who* made it
+  and *why*, so the human-in-the-loop step leaves an audit trail.
 
 ### Incident graph (Iteration 4)
 
@@ -118,10 +122,20 @@ uv run uvicorn sentinel.api.app:create_app --factory --reload --port 8000
 
 ### Try it
 
+Every endpoint except `/healthz` and `/readyz` needs an API key. Generate one and add it
+to `.env` as a `name:key` pair (the name is how the caller appears in logs and on
+approval decisions):
+
+```bash
+export SENTINEL_API_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+echo "SENTINEL_API_KEYS=local-dev:$SENTINEL_API_KEY" >> .env   # then restart the API
+```
+
 ```bash
 curl -s http://localhost:8000/healthz
 
 curl -s -X POST http://localhost:8000/investigate \
+  -H "Authorization: Bearer $SENTINEL_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "alert_id": "alert-1024",
@@ -135,7 +149,7 @@ curl -s -X POST http://localhost:8000/investigate \
   }'
 ```
 
-Interactive API docs at `http://localhost:8000/docs`.
+Interactive API docs at `http://localhost:8000/docs` (use **Authorize** to set the key).
 
 ### Ingestion pipeline (event-driven path)
 
@@ -180,18 +194,25 @@ The incident flow investigates, proposes a remediation, and **pauses for approva
 ```bash
 # 1. Open an incident -> returns a thread_id and status "awaiting_approval"
 curl -s -X POST http://localhost:8000/incidents \
+  -H "Authorization: Bearer $SENTINEL_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"alert_id":"inc-1","title":"5xx spike on payments-api",
        "description":"5xx rose to 15% after deploy v4.1.0","severity":"critical",
        "service":"payments-api","source":"prometheus","fired_at":"2026-07-13T09:31:00Z"}'
 
 # 2. Inspect the durable state any time
-curl -s http://localhost:8000/incidents/<thread_id>
+curl -s -H "Authorization: Bearer $SENTINEL_API_KEY" http://localhost:8000/incidents/<thread_id>
 
 # 3. Approve (or reject) -> the paused graph resumes and executes (or skips)
 curl -s -X POST http://localhost:8000/incidents/<thread_id>/decision \
-  -H 'Content-Type: application/json' -d '{"decision":"approved"}'
+  -H "Authorization: Bearer $SENTINEL_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"decision":"approved","note":"rollback window confirmed"}'
 ```
+
+The response records `decided_by` (the caller's key name, or `policy:auto-approve` for
+actions under the auto-approve ceiling) and `decision_note`. Both are stored in the
+checkpointed state, so the audit trail survives restarts along with the incident.
 
 With `DATABASE_URL` set, the pause is persisted in Postgres — restart the process between
 steps 1 and 3 and the incident still resumes correctly. Execution is simulated; no real
@@ -231,6 +252,7 @@ All settings load from the environment or a local `.env` (see `.env.example`).
 | `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `gemini-embedding-001` / `768` | Embeddings for runbook retrieval. |
 | `RUNBOOK_TOP_K` | `3` | Number of runbooks retrieved per alert. |
 | `HITL_AUTO_APPROVE_MAX_RISK` | `none` | Auto-approve actions up to this risk; `none` = always require approval. |
+| `SENTINEL_API_KEYS` | — | Comma-separated `name:key` pairs (keys ≥ 24 chars). Callers send `Authorization: Bearer <key>`. Unset = every protected endpoint returns `503` and `/readyz` is not ready (fail closed). Malformed values stop startup. |
 | `LOG_LEVEL` / `JSON_LOGS` | `INFO` / `true` | Logging. |
 
 ---
