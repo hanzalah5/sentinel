@@ -12,6 +12,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from sentinel.evals.runner import EvalReport
+from sentinel.evals.scoring import describe_errors
 
 
 class Thresholds(BaseModel):
@@ -51,7 +52,10 @@ def check(report: EvalReport, baseline: Baseline) -> list[str]:
             f"top-3 accuracy {m.top3_accuracy:.1%} is below {thresholds.min_top3_accuracy:.1%}"
         )
     if m.error_rate > thresholds.max_error_rate:
-        failures.append(f"error rate {m.error_rate:.1%} is above {thresholds.max_error_rate:.1%}")
+        failures.append(
+            f"error rate {m.error_rate:.1%} ({describe_errors(m)}) is above "
+            f"{thresholds.max_error_rate:.1%}"
+        )
     if thresholds.min_retrieval_hit_rate is not None:
         if not report.rag_enabled:
             failures.append("retrieval is gated but was disabled for this run (no DATABASE_URL)")

@@ -37,12 +37,19 @@ from sentinel.evals.report import render_markdown
 from sentinel.evals.runner import (
     EvalReport,
     Investigate,
+    RequestPacer,
     current_git_sha,
     evaluate,
     graph_investigator,
     run_cases,
 )
-from sentinel.evals.scoring import InvestigationOutcome, aggregate, score_case
+from sentinel.evals.scoring import (
+    InvestigationOutcome,
+    aggregate,
+    classify_error,
+    describe_errors,
+    score_case,
+)
 from sentinel.ingestion.generator import SCENARIOS, TEMPLATES
 from sentinel.rag.ingest import _load_runbooks
 from sentinel.rag.runbooks import RunbookMatch
@@ -297,11 +304,11 @@ def test_run_cases_with_a_perfect_system_scores_everything_correct() -> None:
 
 def test_run_cases_records_failures_without_aborting() -> None:
     def explode(alert: Alert) -> InvestigationOutcome:
-        raise RuntimeError("x" * 1000)
+        raise RuntimeError("x" * 5000)
 
     results = run_cases([_case("a"), _case("b")], explode)
     assert all(r.error and r.error.startswith("RuntimeError: x") for r in results)
-    assert all(len(r.error or "") == 300 for r in results)
+    assert all(len(r.error or "") == 2000 for r in results)
 
 
 def test_graph_investigator_exposes_retrieved_runbooks() -> None:
@@ -484,4 +491,108 @@ def test_cli_run_without_a_baseline_still_fails_when_most_cases_error(
     code = cli.main(["run", "--dataset-dir", str(DATASETS), "--out", str(tmp_path), "--limit", "3"])
 
     assert code == 1
-    assert "error rate 100.0% is above the 10.0% limit" in capsys.readouterr().out
+    assert "error rate 100.0% (3 other) is above the 10.0% limit" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- free-tier support
+
+_QUOTA_429 = (
+    "ChatGoogleGenerativeAIError: Error calling model 'gemini-3.8-flash' (RESOURCE_EXHAUSTED): "
+    "429 RESOURCE_EXHAUSTED. You exceeded your current quota"
+)
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (_QUOTA_429, "rate_limited"),
+        ("504 DEADLINE_EXCEEDED. Deadline expired before operation could complete.", "timeout"),
+        ("ReadTimeout: timed out", "timeout"),
+        ("404 NOT_FOUND: model is no longer available", "other"),
+    ],
+)
+def test_classify_error(error: str, kind: str) -> None:
+    assert classify_error(error) == kind
+
+
+def test_errors_are_counted_by_kind() -> None:
+    results = [
+        score_case(_case("a"), None, 1.0, error=_QUOTA_429),
+        score_case(_case("b"), None, 1.0, error=_QUOTA_429),
+        score_case(_case("c"), None, 1.0, error="504 DEADLINE_EXCEEDED"),
+        score_case(_case("d"), _outcome(IncidentCategory.db_pool_saturation), 1.0),
+    ]
+    m = aggregate(results)
+    assert results[0].error_kind == "rate_limited" and results[3].error_kind is None
+    assert m.errors_by_kind == {"rate_limited": 2, "timeout": 1}
+    assert describe_errors(m) == "2 rate_limited, 1 timeout"
+
+
+def test_report_flags_rate_limiting_and_keeps_errors_short() -> None:
+    results = [score_case(_case("a"), None, 1.0, error=_QUOTA_429 + " x" * 500)]
+    report = _report().model_copy(update={"results": results, "metrics": aggregate(results)})
+    md = render_markdown(report)
+    assert "1 case(s) were rate-limited by the API" in md
+    assert "| Errors | 1 (100.0%): 1 rate_limited |" in md
+    assert "x " * 100 not in md  # only a preview in the table; the JSON keeps the full text
+
+
+class _FakeTime:
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(round(seconds, 6))
+        self.now += seconds
+
+
+def test_pacer_spaces_starts_evenly() -> None:
+    t = _FakeTime()
+    pacer = RequestPacer(30, clock=t.clock, sleep=t.sleep)  # one start every 2 s
+    for _ in range(3):
+        pacer.wait()
+    assert t.sleeps == [2.0, 2.0]  # the first start is immediate
+
+
+def test_pacer_does_not_wait_when_work_is_slower_than_the_pace() -> None:
+    t = _FakeTime()
+    pacer = RequestPacer(60, clock=t.clock, sleep=t.sleep)
+    pacer.wait()
+    t.now += 5  # the case itself took longer than the 1 s interval
+    pacer.wait()
+    assert t.sleeps == []
+
+
+def test_pacer_disabled_and_validated() -> None:
+    t = _FakeTime()
+    pacer = RequestPacer(None, clock=t.clock, sleep=t.sleep)
+    for _ in range(5):
+        pacer.wait()
+    assert t.sleeps == []
+    with pytest.raises(ValueError):
+        RequestPacer(0)
+
+
+def test_run_cases_waits_on_the_pacer_before_each_case() -> None:
+    waits: list[int] = []
+
+    class CountingPacer(RequestPacer):
+        def wait(self) -> None:
+            waits.append(1)
+
+    cases = [_case("a"), _case("b"), _case("c")]
+    run_cases(cases, _oracle(cases), concurrency=1, pacer=CountingPacer(None))
+    assert len(waits) == 3
+
+
+def test_cli_run_accepts_a_pace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = load_split(DATASETS, "dev")
+    monkeypatch.setattr(cli, "get_settings", _ready_settings)
+    monkeypatch.setattr(cli, "build_live_investigator", lambda settings: _oracle(cases))
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    argv = ["run", "--dataset-dir", str(DATASETS), "--out", str(tmp_path), "--limit", "2"]
+    assert cli.main([*argv, "--concurrency", "1", "--rpm", "6000"]) == 0

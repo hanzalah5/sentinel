@@ -8,8 +8,10 @@ of the same outputs always score the same.
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -17,6 +19,20 @@ from sentinel.contracts import IncidentCategory, RootCauseHypothesis
 from sentinel.evals.dataset import EvalCase
 
 TOP_K = 3
+
+ErrorKind = Literal["rate_limited", "timeout", "other"]
+
+_RATE_LIMITED = re.compile(r"\b429\b|RESOURCE_EXHAUSTED|quota", re.IGNORECASE)
+_TIMEOUT = re.compile(r"\b504\b|DEADLINE_EXCEEDED|timed? ?out", re.IGNORECASE)
+
+
+def classify_error(error: str) -> ErrorKind:
+    """Bucket a failure so API quota or latency problems can't pass for model quality."""
+    if _RATE_LIMITED.search(error):
+        return "rate_limited"
+    if _TIMEOUT.search(error):
+        return "timeout"
+    return "other"
 
 
 @dataclass(frozen=True)
@@ -44,6 +60,7 @@ class CaseResult(BaseModel):
     citation_hit: bool | None
     latency_seconds: float
     error: str | None = None
+    error_kind: ErrorKind | None = None
 
 
 def score_case(
@@ -78,6 +95,7 @@ def score_case(
         citation_hit=None if expected_runbook is None else expected_runbook in cited,
         latency_seconds=round(latency_seconds, 3),
         error=error,
+        error_kind=classify_error(error) if error else None,
     )
 
 
@@ -94,6 +112,7 @@ class Metrics(BaseModel):
     cases: int
     errors: int
     error_rate: float
+    errors_by_kind: dict[str, int]
     top1_accuracy: float
     top3_accuracy: float
     retrieval_hit_rate: float | None
@@ -102,6 +121,11 @@ class Metrics(BaseModel):
     latency_p95_seconds: float
     by_category: dict[str, GroupMetrics]
     by_source: dict[str, GroupMetrics]
+
+
+def describe_errors(metrics: Metrics) -> str:
+    """E.g. ``"18 rate_limited, 2 timeout"``; empty when there were no errors."""
+    return ", ".join(f"{count} {kind}" for kind, count in metrics.errors_by_kind.items())
 
 
 def _rate(hits: int, total: int) -> float:
@@ -144,6 +168,7 @@ def aggregate(results: list[CaseResult]) -> Metrics:
         cases=total,
         errors=errors,
         error_rate=_rate(errors, total),
+        errors_by_kind=dict(sorted(Counter(r.error_kind for r in results if r.error_kind).items())),
         top1_accuracy=_rate(sum(r.top1_correct for r in results), total),
         top3_accuracy=_rate(sum(r.top3_correct for r in results), total),
         retrieval_hit_rate=_optional_rate([r.retrieval_hit for r in results]),

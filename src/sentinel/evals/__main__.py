@@ -18,6 +18,7 @@ from sentinel.evals.dataset import SPLITS, Split, load_split, write_generated
 from sentinel.evals.gate import check, load_baseline
 from sentinel.evals.report import render_markdown
 from sentinel.evals.runner import Investigate, evaluate, graph_investigator
+from sentinel.evals.scoring import describe_errors
 from sentinel.logging import configure_logging
 
 DEFAULT_DATASET_DIR = Path("evals/datasets")
@@ -60,6 +61,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         model=settings.gemini_model,
         rag_enabled=settings.rag_enabled,
         concurrency=args.concurrency,
+        requests_per_minute=args.rpm or None,
     )
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -75,7 +77,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         failures = []
         if report.metrics.error_rate > args.max_error_rate:
             failures.append(
-                f"error rate {report.metrics.error_rate:.1%} is above the "
+                f"error rate {report.metrics.error_rate:.1%} "
+                f"({describe_errors(report.metrics)}) is above the "
                 f"{args.max_error_rate:.1%} limit; scores from this run are not meaningful"
             )
     markdown = render_markdown(report, failures)
@@ -102,6 +105,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dataset-dir", type=Path, default=DEFAULT_DATASET_DIR)
     run.add_argument("--out", type=Path, default=Path("eval-results"))
     run.add_argument("--concurrency", type=int, default=2)
+    run.add_argument(
+        "--rpm",
+        type=float,
+        default=0,
+        help="pace case starts to this many per minute (0 = no pacing); for rate-limited keys",
+    )
     run.add_argument("--limit", type=int, default=0, help="only run the first N cases")
     run.add_argument("--gate", type=Path, default=None, help="baseline file to gate against")
     run.add_argument(

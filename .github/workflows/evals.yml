@@ -1,12 +1,18 @@
 name: Evals
 
 # Live root-cause evaluation against Gemini with pgvector runbook retrieval.
-# - Pull requests that touch the agent run the dev split and are gated on evals/baseline.json.
+#
+# The API key is on Gemini's free tier, so the eval spends quota deliberately:
+# - Pull requests run the dev split only when labelled `run-evals` (and on each push
+#   while the label stays). The run is gated on evals/baseline.json.
 # - A weekly run reports the held-out test split.
 # - Run manually from the Actions tab for either split.
+# - Cases run one at a time, paced to EVAL_RPM starts per minute (repository variable,
+#   default 4), with few retries so an exhausted daily quota fails fast.
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "src/**"
       - "runbooks/**"
@@ -33,6 +39,7 @@ concurrency:
 
 jobs:
   live-eval:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-evals')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -55,7 +62,8 @@ jobs:
       EVAL_SPLIT: ${{ github.event_name == 'schedule' && 'test' || inputs.split || 'dev' }}
       JSON_LOGS: "false"
       LOG_LEVEL: WARNING
-      LLM_MAX_RETRIES: "6"
+      LLM_MAX_RETRIES: "2"
+      EVAL_RPM: ${{ vars.EVAL_RPM || '4' }}
       LLM_TIMEOUT_SECONDS: "60"
     steps:
       - name: Check for the API key
@@ -103,7 +111,8 @@ jobs:
         run: |
           gate=()
           if [ -f evals/baseline.json ]; then gate=(--gate evals/baseline.json); fi
-          uv run python -m sentinel.evals run --split "$EVAL_SPLIT" --out eval-results "${gate[@]}"
+          uv run python -m sentinel.evals run --split "$EVAL_SPLIT" --out eval-results \
+            --concurrency 1 --rpm "$EVAL_RPM" "${gate[@]}"
 
       - name: Upload results
         if: always() && steps.key.outputs.present == 'true'
