@@ -64,6 +64,12 @@ graph:
   checkpointer persists the paused state, so approval can arrive minutes or a restart
   later and resume exactly where it left off. Execution is behind a
   `RemediationExecutor` protocol; the only shipped executor is a safe simulator.
+- **Checkpoints revive only known types.** LangGraph's default revives any class named
+  in a checkpoint. Sentinel's checkpointer uses a strict serializer instead: LangGraph's
+  built-in safe types plus Sentinel's own state types, derived from its contract
+  modules. Anything else comes back as plain data. A test walks `IncidentState` so a
+  new state type can't be left off the list, and CI resumes a paused incident from a
+  fresh Postgres connection to prove it survives a restart.
 - **Authenticated, attributable decisions.** Every endpoint except liveness/readiness
   requires a bearer API key, compared in constant time against SHA-256 digests. With no
   keys configured the API fails closed. Each approval or rejection records *who* made it
@@ -316,9 +322,5 @@ tests/              # offline suite (fake model + fakeredis + fake retriever), k
 
 ## Known limitations
 
-- **Checkpoint serialization allow-list.** LangGraph persists incident state via msgpack
-  and currently warns when deserializing the project's own Pydantic types; a future
-  LangGraph will require registering them in an allow-list. It round-trips correctly
-  today — this is a forward-compat follow-up, not a current defect.
 - **Simulated execution only.** Remediations are never actually run; a real
   `RemediationExecutor` is deliberately out of scope.

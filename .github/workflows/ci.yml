@@ -21,8 +21,24 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
+    services:
+      # A disposable database for the checkpoint tests (pause, "restart", resume).
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel
+          POSTGRES_DB: sentinel_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     env:
       UV_PYTHON: ${{ matrix.python-version }}
+      SENTINEL_TEST_DATABASE_URL: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +61,7 @@ jobs:
         run: uv run mypy src tests
 
       - name: Test
-        run: uv run pytest --cov=sentinel --cov-report=term-missing
+        run: uv run pytest -rs --cov=sentinel --cov-report=term-missing
 
   container:
     name: container image
