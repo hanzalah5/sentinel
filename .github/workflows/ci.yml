@@ -116,3 +116,13 @@ jobs:
       - name: Container logs
         if: always()
         run: docker logs sentinel 2>&1 | tail -50 || true
+
+  infra:
+    name: infra scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint shell scripts
+        run: shellcheck infra/*.sh
