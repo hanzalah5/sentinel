@@ -1,0 +1,125 @@
+name: Evals
+
+# Live root-cause evaluation against Gemini with pgvector runbook retrieval.
+#
+# The API key is on Gemini's free tier, so the eval spends quota deliberately:
+# - Pull requests run the dev split only when labelled `run-evals` (and on each push
+#   while the label stays). The run is gated on evals/baseline.json.
+# - A weekly run reports the held-out test split.
+# - Run manually from the Actions tab for either split.
+# - Cases run one at a time, paced to EVAL_RPM starts per minute (repository variable,
+#   default 4), with no retries: each case is exactly one model request, at most 12 a run.
+# - After 2 consecutive provider errors (overload or quota) the run stops and records the
+#   remaining cases as not run, so a bad provider day doesn't spend the day's quota.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - "src/**"
+      - "runbooks/**"
+      - "evals/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/evals.yml"
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      split:
+        description: "Dataset split to evaluate"
+        type: choice
+        options: [dev, test]
+        default: dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-eval:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-evals')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel
+          POSTGRES_DB: sentinel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      DATABASE_URL: postgresql://sentinel:sentinel@localhost:5432/sentinel
+      EVAL_SPLIT: ${{ github.event_name == 'schedule' && 'test' || inputs.split || 'dev' }}
+      JSON_LOGS: "false"
+      LOG_LEVEL: WARNING
+      LLM_MAX_RETRIES: "0"
+      EVAL_RPM: ${{ vars.EVAL_RPM || '4' }}
+      LLM_TIMEOUT_SECONDS: "60"
+    steps:
+      - name: Check for the API key
+        id: key
+        run: |
+          if [ -n "$GOOGLE_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GOOGLE_API_KEY is not available to this run (fork or Dependabot PR); skipping the live eval."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.key.outputs.present == 'true'
+
+      - name: Install uv
+        if: steps.key.outputs.present == 'true'
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.13.0"
+          enable-cache: true
+
+      - name: Sync dependencies
+        if: steps.key.outputs.present == 'true'
+        run: uv sync --frozen
+
+      # Models get retired; when the configured one is gone every case errors. Listing
+      # what this key can call makes that diagnosable straight from the job log.
+      - name: Show the configured and available Gemini models
+        if: steps.key.outputs.present == 'true'
+        run: |
+          echo "Configured: $(uv run python -c 'from sentinel.config import get_settings; print(get_settings().gemini_model)')"
+          echo "Available (generateContent):"
+          curl -sSf -H "x-goog-api-key: ${GOOGLE_API_KEY}" \
+            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000" \
+            | jq -r '.models[] | select(.supportedGenerationMethods | index("generateContent")) | .name' \
+            | sed 's#^models/##' | grep '^gemini' | sort | paste -sd ' ' -
+
+      - name: Ingest runbooks into pgvector
+        if: steps.key.outputs.present == 'true'
+        run: uv run python -m sentinel.rag.ingest --path runbooks
+
+      - name: Run the eval
+        if: steps.key.outputs.present == 'true'
+        run: |
+          gate=()
+          if [ -f evals/baseline.json ]; then gate=(--gate evals/baseline.json); fi
+          uv run python -m sentinel.evals run --split "$EVAL_SPLIT" --out eval-results \
+            --concurrency 1 --rpm "$EVAL_RPM" --stop-after-provider-errors 2 "${gate[@]}"
+
+      - name: Upload results
+        if: always() && steps.key.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ env.EVAL_SPLIT }}
+          path: eval-results/
+          if-no-files-found: ignore

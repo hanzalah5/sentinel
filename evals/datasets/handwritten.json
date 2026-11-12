@@ -1,0 +1,230 @@
+[
+  {
+    "case_id": "hw-dev-01",
+    "split": "dev",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-dev-01",
+      "title": "High p99 latency on orders-api",
+      "description": "p99 latency rose from 140ms to 3.1s within 2 minutes of deploying v5.2.0. DB connection pool utilisation is steady at 35% with no pool-wait warnings. Profiling shows a new synchronous call to recommendations-api on every request; recommendations-api itself is healthy at its usual 400ms p99.",
+      "severity": "critical",
+      "service": "orders-api",
+      "source": "prometheus",
+      "fired_at": "2026-07-02T09:00:00Z",
+      "labels": {"region": "us-east-1", "deployment": "v5.2.0"}
+    },
+    "expected_category": "bad_deploy",
+    "acceptable_categories": [],
+    "expected_runbook": null,
+    "notes": "Latency title with the DB pool explicitly ruled out. The regression is a blocking call added in the deploy; the dependency itself is healthy, so not dependency_failure."
+  },
+  {
+    "case_id": "hw-dev-02",
+    "split": "dev",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-dev-02",
+      "title": "CrashLoopBackOff on payments-api",
+      "description": "Pods restart every ~40s. Last state: Terminated, reason OOMKilled, exit code 137. Memory limit 512Mi; the heap grows past it while the in-memory cache warms up at startup.",
+      "severity": "critical",
+      "service": "payments-api",
+      "source": "kubernetes",
+      "fired_at": "2026-07-02T09:10:00Z",
+      "labels": {"region": "eu-west-1"}
+    },
+    "expected_category": "memory_leak_oom",
+    "acceptable_categories": ["startup_crash"],
+    "expected_runbook": "Container OOMKilled / memory pressure",
+    "notes": "Looks like a crash loop, but the termination reason is OOMKilled. Memory is the mechanism; startup_crash is accepted because it happens during warm-up."
+  },
+  {
+    "case_id": "hw-dev-03",
+    "split": "dev",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-dev-03",
+      "title": "Elevated 5xx error rate on checkout-api",
+      "description": "5xx rate at 18% (baseline 0.3%). All errors are 503s returned from calls to payments-api. checkout-api has not been deployed in 6 days, and payments-api's status page reports a partial outage.",
+      "severity": "critical",
+      "service": "checkout-api",
+      "source": "prometheus",
+      "fired_at": "2026-07-02T09:20:00Z",
+      "labels": {"region": "us-west-2"}
+    },
+    "expected_category": "dependency_failure",
+    "acceptable_categories": [],
+    "expected_runbook": "Elevated HTTP 5xx error rate",
+    "notes": "Same title as the generated bad-deploy scenario, but there is no deploy and the errors come from a failing upstream."
+  },
+  {
+    "case_id": "hw-dev-04",
+    "split": "dev",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-dev-04",
+      "title": "Disk usage high on search-api node",
+      "description": "Root volume at 94% and rising about 2% every 10 minutes since yesterday's release v8.1, which set LOG_LEVEL=debug. /var/log/search-api is 41GB. Log rotation is configured but rotates daily.",
+      "severity": "warning",
+      "service": "search-api",
+      "source": "node-exporter",
+      "fired_at": "2026-07-02T09:30:00Z",
+      "labels": {"region": "us-east-1", "deployment": "v8.1"}
+    },
+    "expected_category": "disk_pressure",
+    "acceptable_categories": ["bad_deploy"],
+    "expected_runbook": "Disk space nearly full",
+    "notes": "The disk filling is the mechanism; the debug-logging release is the trigger, so bad_deploy is also accepted."
+  },
+  {
+    "case_id": "hw-dev-05",
+    "split": "dev",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-dev-05",
+      "title": "Intermittent TLS handshake failures on api-gateway",
+      "description": "About 30% of client requests fail with 'x509: certificate has expired'. Certificate renewal succeeded 3 days ago, but 2 of 6 load-balancer nodes still serve the old certificate.",
+      "severity": "critical",
+      "service": "api-gateway",
+      "source": "synthetic-monitor",
+      "fired_at": "2026-07-02T09:40:00Z",
+      "labels": {"region": "eu-west-1"}
+    },
+    "expected_category": "cert_expiry",
+    "acceptable_categories": [],
+    "expected_runbook": "TLS certificate expiring or expired",
+    "notes": "Renewal looks fine at first glance; the new certificate was not rolled out everywhere."
+  },
+  {
+    "case_id": "hw-dev-06",
+    "split": "dev",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-dev-06",
+      "title": "Request timeouts on user-service",
+      "description": "Requests time out after 30s and logs are full of 'timed out waiting for connection from pool'. Postgres shows 180 sessions from user-service idle in transaction since the 09:10 deploy.",
+      "severity": "critical",
+      "service": "user-service",
+      "source": "prometheus",
+      "fired_at": "2026-07-02T09:50:00Z",
+      "labels": {"region": "us-west-2"}
+    },
+    "expected_category": "db_pool_saturation",
+    "acceptable_categories": ["bad_deploy"],
+    "expected_runbook": "High p99 latency / database connection pool saturation",
+    "notes": "Timeouts rather than a latency title. A connection leak shipped in a deploy exhausts the pool; bad_deploy is also accepted."
+  },
+  {
+    "case_id": "hw-test-01",
+    "split": "test",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-test-01",
+      "title": "Pods not becoming ready on inventory-service",
+      "description": "New pods exit with code 1 about 2s after start with 'KeyError: INVENTORY_DB_URL'. The variable was removed from the config map in this morning's change.",
+      "severity": "critical",
+      "service": "inventory-service",
+      "source": "kubernetes",
+      "fired_at": "2026-07-03T09:00:00Z",
+      "labels": {"region": "us-east-1"}
+    },
+    "expected_category": "startup_crash",
+    "acceptable_categories": ["bad_deploy"],
+    "expected_runbook": "Pod CrashLoopBackOff",
+    "notes": "A crash at startup caused by a config change; bad_deploy is also accepted."
+  },
+  {
+    "case_id": "hw-test-02",
+    "split": "test",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-test-02",
+      "title": "Latency increase on cart-service",
+      "description": "p95 latency 1.8s (baseline 120ms). RSS on every pod has grown from 600Mi to 1.9Gi over 3 days without restarts, and GC pause time is up 12x. No deploys this week; DB metrics normal.",
+      "severity": "warning",
+      "service": "cart-service",
+      "source": "prometheus",
+      "fired_at": "2026-07-03T09:10:00Z",
+      "labels": {"region": "eu-west-1"}
+    },
+    "expected_category": "memory_leak_oom",
+    "acceptable_categories": [],
+    "expected_runbook": "Container OOMKilled / memory pressure",
+    "notes": "A latency title, but the signals point to a memory leak causing GC thrash before any OOM kill."
+  },
+  {
+    "case_id": "hw-test-03",
+    "split": "test",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-test-03",
+      "title": "Elevated 5xx error rate on search-api",
+      "description": "5xx at 22%, starting 3 minutes after deploy v4.9.0. All errors are 500s from one endpoint, /search/suggest, with \"TypeError: 'NoneType' object is not subscriptable\". Dependencies are healthy.",
+      "severity": "critical",
+      "service": "search-api",
+      "source": "prometheus",
+      "fired_at": "2026-07-03T09:20:00Z",
+      "labels": {"region": "us-west-2", "deployment": "v4.9.0"}
+    },
+    "expected_category": "bad_deploy",
+    "acceptable_categories": [],
+    "expected_runbook": "Elevated HTTP 5xx error rate",
+    "notes": "A code regression with a stack trace, isolated to one endpoint."
+  },
+  {
+    "case_id": "hw-test-04",
+    "split": "test",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-test-04",
+      "title": "Database write failures on billing-worker",
+      "description": "Writes fail with 'could not extend file: No space left on device'. The Postgres data volume is at 100%; the WAL directory grew by 60GB after a replication slot stopped being consumed.",
+      "severity": "critical",
+      "service": "billing-worker",
+      "source": "postgres-exporter",
+      "fired_at": "2026-07-03T09:30:00Z",
+      "labels": {"region": "us-east-1"}
+    },
+    "expected_category": "disk_pressure",
+    "acceptable_categories": [],
+    "expected_runbook": "Disk space nearly full",
+    "notes": "Presents as a database problem, but the mechanism is a full volume (WAL growth)."
+  },
+  {
+    "case_id": "hw-test-05",
+    "split": "test",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-test-05",
+      "title": "Upstream timeouts on notifications-service",
+      "description": "Calls to the third-party SMS provider time out (p99 10s, the configured timeout). The provider's status page confirms degraded performance. CPU and memory are normal and there were no deploys this week.",
+      "severity": "warning",
+      "service": "notifications-service",
+      "source": "prometheus",
+      "fired_at": "2026-07-03T09:40:00Z",
+      "labels": {"region": "eu-west-1"}
+    },
+    "expected_category": "dependency_failure",
+    "acceptable_categories": [],
+    "expected_runbook": null,
+    "notes": "No runbook covers a slow third-party provider, so retrieval is not scored for this case."
+  },
+  {
+    "case_id": "hw-test-06",
+    "split": "test",
+    "source": "handwritten",
+    "alert": {
+      "alert_id": "hw-test-06",
+      "title": "CrashLoopBackOff on reporting-api",
+      "description": "The container is killed by its liveness probe after 10s. Logs show the app is still loading its 2GB model file when killed (this normally takes ~25s); there are no errors before termination. The probe config is unchanged, but the model file doubled in size last week.",
+      "severity": "warning",
+      "service": "reporting-api",
+      "source": "kubernetes",
+      "fired_at": "2026-07-03T09:50:00Z",
+      "labels": {"region": "us-west-2"}
+    },
+    "expected_category": "startup_crash",
+    "acceptable_categories": [],
+    "expected_runbook": "Pod CrashLoopBackOff",
+    "notes": "A slow-but-healthy start killed by the liveness probe; the CrashLoopBackOff runbook covers this case explicitly."
+  }
+]

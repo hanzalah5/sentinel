@@ -32,6 +32,10 @@ Rules:
 over guesses.
 - List the exact titles of the runbooks you actually relied on in `runbook_references`.
 - Rank plausible causes by likelihood, most likely first.
+- Give each cause a `category` naming its mechanism. Choose the most specific one: a \
+crash during startup after a deploy is `startup_crash`, and a memory leak shipped in a \
+deploy is `memory_leak_oom`. Use `bad_deploy` only when no more specific category fits, \
+and `other` only when none does.
 - Assign each cause a calibrated confidence between 0 and 1.
 - Cite the specific signals in the alert (and runbook guidance) that support each cause.
 - Recommend a single safe next diagnostic or mitigation step.

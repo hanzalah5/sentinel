@@ -16,7 +16,7 @@ from langchain_core.runnables import RunnableLambda
 from sentinel.agent.graph import build_graph_from_structured
 from sentinel.api.app import create_app
 from sentinel.config import Settings
-from sentinel.contracts import CandidateCause, RootCauseHypothesis
+from sentinel.contracts import CandidateCause, IncidentCategory, RootCauseHypothesis
 from sentinel.service import InvestigationService
 
 TEST_API_KEY = "test-api-key-0123456789abcdef"
@@ -27,6 +27,7 @@ FIXED_HYPOTHESIS = RootCauseHypothesis(
     candidate_causes=[
         CandidateCause(
             cause="Database connection pool exhaustion",
+            category=IncidentCategory.db_pool_saturation,
             confidence=0.72,
             evidence=[
                 "DB connection pool saturation warnings",
@@ -35,6 +36,7 @@ FIXED_HYPOTHESIS = RootCauseHypothesis(
         ),
         CandidateCause(
             cause="Slow downstream dependency",
+            category=IncidentCategory.dependency_failure,
             confidence=0.2,
             evidence=["latency rose while error rate stayed flat"],
         ),
@@ -52,7 +54,7 @@ def fake_structured_model() -> RunnableLambda[Any, RootCauseHypothesis]:
 def ready_settings() -> Settings:
     return Settings(
         google_api_key="test-key",
-        gemini_model="gemini-2.5-flash",
+        gemini_model="gemini-3.8-flash",
         json_logs=False,
         langfuse_public_key=None,
         langfuse_secret_key=None,

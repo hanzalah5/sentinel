@@ -62,10 +62,40 @@ class Alert(BaseModel):
     }
 
 
+class IncidentCategory(StrEnum):
+    """Coarse root-cause mechanism.
+
+    The free-text ``cause`` stays the explanation; the category makes answers
+    comparable, so root-cause accuracy can be scored exactly (see ``sentinel.evals``).
+    """
+
+    db_pool_saturation = "db_pool_saturation"
+    memory_leak_oom = "memory_leak_oom"
+    bad_deploy = "bad_deploy"
+    disk_pressure = "disk_pressure"
+    startup_crash = "startup_crash"
+    cert_expiry = "cert_expiry"
+    dependency_failure = "dependency_failure"
+    other = "other"
+
+
 class CandidateCause(BaseModel):
     """A single ranked, evidence-backed candidate root cause."""
 
     cause: str = Field(description="A specific, plausible root cause.")
+    category: IncidentCategory = Field(
+        description=(
+            "The mechanism behind this cause. Choose the most specific one: "
+            "db_pool_saturation (database connection pool exhausted or connections held "
+            "too long); memory_leak_oom (memory growth, memory pressure or OOM kills); "
+            "disk_pressure (a disk or volume filling up); startup_crash (the process "
+            "fails or is killed while starting); cert_expiry (a TLS certificate expired, "
+            "expiring or not yet rotated everywhere); dependency_failure (an upstream or "
+            "downstream service failing or slow); bad_deploy (a regression shipped in a "
+            "recent deploy or config change that no category above describes better); "
+            "other (none of these)."
+        )
+    )
     confidence: float = Field(ge=0.0, le=1.0, description="Calibrated confidence between 0 and 1.")
     evidence: list[str] = Field(
         default_factory=list,

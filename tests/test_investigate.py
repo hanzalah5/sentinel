@@ -27,7 +27,7 @@ def test_investigate_returns_structured_result(client: TestClient) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["alert_id"] == "alert-1024"
-    assert body["model"] == "gemini-2.5-flash"
+    assert body["model"] == "gemini-3.8-flash"
     assert body["hypothesis"]["candidate_causes"]
     assert body["hypothesis"]["recommended_next_step"]
     # The correlation ID is echoed on the response and matches the result body.

@@ -1,4 +1,4 @@
-.PHONY: install lint format typecheck test check run worker seed ingest up down
+.PHONY: install lint format typecheck test check run worker seed ingest eval eval-build up down
 
 install:
 	uv sync
@@ -28,6 +28,12 @@ seed:
 
 ingest:
 	uv run python -m sentinel.rag.ingest --path runbooks
+
+eval:  # live root-cause eval on the dev split (needs GOOGLE_API_KEY; DATABASE_URL for RAG)
+	uv run python -m sentinel.evals run --split dev
+
+eval-build:  # rebuild evals/datasets/generated.jsonl from the alert generator
+	uv run python -m sentinel.evals build
 
 up:
 	docker compose up --build

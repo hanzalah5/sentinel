@@ -32,6 +32,7 @@ from sentinel.contracts import (
     CandidateCause,
     ExecutionOutcome,
     ExecutionResult,
+    IncidentCategory,
     IncidentStatus,
     RemediationAction,
     RootCauseHypothesis,
@@ -47,7 +48,11 @@ needs_postgres = pytest.mark.skipif(
 
 _HYPOTHESIS = RootCauseHypothesis(
     summary="Connection pool exhausted after the deploy.",
-    candidate_causes=[CandidateCause(cause="pool exhausted", confidence=0.7)],
+    candidate_causes=[
+        CandidateCause(
+            cause="pool exhausted", category=IncidentCategory.db_pool_saturation, confidence=0.7
+        )
+    ],
     recommended_next_step="Roll back.",
     runbook_references=["High p99 latency / database connection pool saturation"],
 )

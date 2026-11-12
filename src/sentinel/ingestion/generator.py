@@ -13,12 +13,13 @@ import argparse
 import asyncio
 import random
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
 
 from sentinel.config import get_settings
-from sentinel.contracts import Alert, AlertSeverity
+from sentinel.contracts import Alert, AlertSeverity, IncidentCategory
 from sentinel.ingestion.streams import AlertStream
 from sentinel.logging import configure_logging
 
@@ -101,14 +102,60 @@ def _cert_expiry(rng: random.Random, service: str) -> tuple[str, str, AlertSever
     )
 
 
-TEMPLATES: list[Template] = [
-    _high_latency,
-    _oom_kill,
-    _error_rate,
-    _disk_full,
-    _crashloop,
-    _cert_expiry,
-]
+@dataclass(frozen=True)
+class Scenario:
+    """A generator template plus the ground truth it represents.
+
+    The category and runbook are known by construction, which is what lets
+    ``sentinel.evals`` build labelled cases from the generator.
+    """
+
+    name: str
+    template: Template
+    category: IncidentCategory
+    runbook_title: str
+
+
+SCENARIOS: tuple[Scenario, ...] = (
+    Scenario(
+        "high_latency",
+        _high_latency,
+        IncidentCategory.db_pool_saturation,
+        "High p99 latency / database connection pool saturation",
+    ),
+    Scenario(
+        "oom_kill",
+        _oom_kill,
+        IncidentCategory.memory_leak_oom,
+        "Container OOMKilled / memory pressure",
+    ),
+    Scenario(
+        "error_rate",
+        _error_rate,
+        IncidentCategory.bad_deploy,
+        "Elevated HTTP 5xx error rate",
+    ),
+    Scenario(
+        "disk_full",
+        _disk_full,
+        IncidentCategory.disk_pressure,
+        "Disk space nearly full",
+    ),
+    Scenario(
+        "crashloop",
+        _crashloop,
+        IncidentCategory.startup_crash,
+        "Pod CrashLoopBackOff",
+    ),
+    Scenario(
+        "cert_expiry",
+        _cert_expiry,
+        IncidentCategory.cert_expiry,
+        "TLS certificate expiring or expired",
+    ),
+)
+
+TEMPLATES: list[Template] = [scenario.template for scenario in SCENARIOS]
 
 
 def make_alert(rng: random.Random, index: int) -> Alert:
