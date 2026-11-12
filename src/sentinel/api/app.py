@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 
 from sentinel.agent.graph import build_graph
 from sentinel.agent.incident_graph import build_incident_graph
+from sentinel.api.auth import ApiKeyAuthenticator, CurrentPrincipal, require_principal
 from sentinel.api.middleware import CorrelationIdMiddleware
 from sentinel.checkpointer import build_checkpointer
 from sentinel.config import Settings, get_settings
@@ -126,6 +127,7 @@ def create_app(
     app.state.settings = settings
     app.state.service = service
     app.state.incident_service = incident_service
+    app.state.authenticator = ApiKeyAuthenticator(settings.api_keys())
     app.add_middleware(CorrelationIdMiddleware)
 
     @app.get("/healthz", response_model=HealthStatus, tags=["ops"])
@@ -135,7 +137,12 @@ def create_app(
 
     @app.get("/readyz", response_model=HealthStatus, tags=["ops"])
     async def readyz(request: Request) -> HealthStatus:
-        """Readiness: the agent is wired and can serve investigations."""
+        """Readiness: the agent is wired, callers can authenticate, investigations work."""
+        if not request.app.state.authenticator.configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="not ready: SENTINEL_API_KEYS not configured",
+            )
         if request.app.state.service is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -143,7 +150,12 @@ def create_app(
             )
         return HealthStatus(status="ok", detail="ready")
 
-    @app.post("/investigate", response_model=InvestigationResult, tags=["agent"])
+    @app.post(
+        "/investigate",
+        response_model=InvestigationResult,
+        tags=["agent"],
+        dependencies=[Depends(require_principal)],
+    )
     def investigate(
         alert: Alert,
         request: Request,
@@ -153,7 +165,12 @@ def create_app(
         correlation_id = getattr(request.state, "correlation_id", None)
         return service.investigate(alert, correlation_id=correlation_id)
 
-    @app.post("/incidents", response_model=IncidentView, tags=["incident"])
+    @app.post(
+        "/incidents",
+        response_model=IncidentView,
+        tags=["incident"],
+        dependencies=[Depends(require_principal)],
+    )
     def create_incident(
         alert: Alert,
         service: Annotated[IncidentService, Depends(get_incident_service)],
@@ -167,17 +184,26 @@ def create_app(
         tags=["incident"],
     )
     def decide_incident(
+        principal: CurrentPrincipal,
         thread_id: str,
         body: DecisionRequest,
         service: Annotated[IncidentService, Depends(get_incident_service)],
     ) -> IncidentView:
-        """Approve or reject a paused incident's proposed remediation."""
-        view = service.decide(thread_id, body.decision)
+        """Approve or reject a paused incident's proposed remediation.
+
+        The caller's identity and note are stored on the incident as its audit trail.
+        """
+        view = service.decide(thread_id, body.decision, decided_by=principal.name, note=body.note)
         if view is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown incident")
         return view
 
-    @app.get("/incidents/{thread_id}", response_model=IncidentView, tags=["incident"])
+    @app.get(
+        "/incidents/{thread_id}",
+        response_model=IncidentView,
+        tags=["incident"],
+        dependencies=[Depends(require_principal)],
+    )
     def get_incident(
         thread_id: str,
         service: Annotated[IncidentService, Depends(get_incident_service)],

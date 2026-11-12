@@ -52,7 +52,7 @@ services:
 
   worker:
     build: .
-    command: ["uv", "run", "--no-dev", "python", "-m", "sentinel.ingestion.worker"]
+    command: ["python", "-m", "sentinel.ingestion.worker"]
     env_file:
       - path: .env
         required: false

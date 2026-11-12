@@ -21,8 +21,24 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
+    services:
+      # A disposable database for the checkpoint tests (pause, "restart", resume).
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel
+          POSTGRES_DB: sentinel_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     env:
       UV_PYTHON: ${{ matrix.python-version }}
+      SENTINEL_TEST_DATABASE_URL: postgresql://sentinel:sentinel@localhost:5432/sentinel_test
     steps:
       - uses: actions/checkout@v4
 
@@ -45,4 +61,58 @@ jobs:
         run: uv run mypy src tests
 
       - name: Test
-        run: uv run pytest --cov=sentinel --cov-report=term-missing
+        run: uv run pytest -rs --cov=sentinel --cov-report=term-missing
+
+  container:
+    name: container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t sentinel:ci .
+
+      - name: Runs as a non-root user
+        run: |
+          uid=$(docker run --rm --entrypoint id sentinel:ci -u)
+          echo "uid=$uid"
+          test "$uid" != "0"
+
+      - name: Ships no build tooling
+        run: |
+          if docker run --rm --entrypoint sh sentinel:ci -c 'command -v uv'; then
+            echo "uv is present in the runtime image"; exit 1
+          fi
+
+      - name: Serves on $PORT, reports readiness honestly, turns healthy
+        run: |
+          docker run -d --name sentinel -e PORT=8080 -p 8080:8080 sentinel:ci
+          for i in $(seq 1 30); do curl -fsS http://localhost:8080/healthz && break; sleep 1; done
+          curl -fsS http://localhost:8080/healthz
+          # No GOOGLE_API_KEY here, so the service must say it is not ready (503), not crash.
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/readyz)
+          echo "readyz=$code"; test "$code" = "503"
+          # Docker's own HEALTHCHECK must pass too.
+          for i in $(seq 1 30); do
+            health=$(docker inspect -f '{{.State.Health.Status}}' sentinel)
+            [ "$health" = "healthy" ] && break; sleep 3
+          done
+          echo "health=$health"; test "$health" = "healthy"
+
+      - name: Shuts down cleanly on SIGTERM
+        run: |
+          start=$(date +%s)
+          docker stop --time 10 sentinel
+          elapsed=$(( $(date +%s) - start ))
+          exit_code=$(docker inspect -f '{{.State.ExitCode}}' sentinel)
+          echo "stopped in ${elapsed}s with exit code ${exit_code}"
+          # A process that ignores SIGTERM is SIGKILLed after the 10 s grace period (exit 137).
+          # uvicorn shuts down gracefully, then re-raises SIGTERM, so 143 is the clean exit.
+          test "$elapsed" -lt 10
+          case "$exit_code" in 0|143) ;; *) echo "unexpected exit code"; exit 1 ;; esac
+          docker logs sentinel 2>&1 | grep -q "Application shutdown complete"
+
+      - name: Container logs
+        if: always()
+        run: docker logs sentinel 2>&1 | tail -50 || true

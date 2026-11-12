@@ -19,6 +19,9 @@ from sentinel.config import Settings
 from sentinel.contracts import CandidateCause, IncidentCategory, RootCauseHypothesis
 from sentinel.service import InvestigationService
 
+TEST_API_KEY = "test-api-key-0123456789abcdef"
+AUTH_HEADERS = {"Authorization": f"Bearer {TEST_API_KEY}"}
+
 FIXED_HYPOTHESIS = RootCauseHypothesis(
     summary="Database connection pool saturation on checkout-api is the likely cause.",
     candidate_causes=[
@@ -55,6 +58,7 @@ def ready_settings() -> Settings:
         json_logs=False,
         langfuse_public_key=None,
         langfuse_secret_key=None,
+        sentinel_api_keys=f"tester:{TEST_API_KEY}",
     )
 
 
@@ -67,18 +71,20 @@ def fake_service(ready_settings: Settings) -> InvestigationService:
 @pytest.fixture
 def client(ready_settings: Settings, fake_service: InvestigationService) -> Iterator[TestClient]:
     app = create_app(settings=ready_settings, service=fake_service)
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=AUTH_HEADERS) as test_client:
         yield test_client
 
 
 @pytest.fixture
 def unready_client() -> Iterator[TestClient]:
+    """Authenticated, but no LLM: the investigation service is unavailable."""
     settings = Settings(
         google_api_key=None,
         json_logs=False,
         langfuse_public_key=None,
         langfuse_secret_key=None,
+        sentinel_api_keys=f"tester:{TEST_API_KEY}",
     )
     app = create_app(settings=settings, service=None)
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=AUTH_HEADERS) as test_client:
         yield test_client

@@ -202,6 +202,11 @@ class IncidentView(BaseModel):
     hypothesis: RootCauseHypothesis | None = None
     remediation: RemediationAction | None = None
     decision: ApprovalDecision | None = None
+    decided_by: str | None = Field(
+        default=None,
+        description="Who made the decision: an API key name, or 'policy:auto-approve'.",
+    )
+    decision_note: str | None = None
     execution: ExecutionResult | None = None
 
 
