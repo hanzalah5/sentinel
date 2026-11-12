@@ -225,6 +225,7 @@ def test_score_top1_top3_and_runbooks() -> None:
         retrieved_runbooks=[runbook, "Disk space nearly full"],
     )
     result = score_case(_case(), outcome, 1.23456)
+    assert result.answer == outcome.hypothesis  # the full answer is kept for analysis
     assert not result.top1_correct
     assert result.top3_correct
     assert result.retrieval_hit and result.citation_hit
@@ -250,6 +251,7 @@ def test_score_only_considers_the_top_three_causes() -> None:
 
 def test_score_failed_investigation_is_wrong() -> None:
     result = score_case(_case(), None, 0.5, error="boom")
+    assert result.answer is None
     assert not result.top1_correct and not result.top3_correct
     assert result.retrieval_hit is False
     assert result.error == "boom"

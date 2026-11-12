@@ -61,6 +61,8 @@ class CaseResult(BaseModel):
     latency_seconds: float
     error: str | None = None
     error_kind: ErrorKind | None = None
+    # The agent's full answer, kept for error analysis and as real example output.
+    answer: RootCauseHypothesis | None = None
 
 
 def score_case(
@@ -96,6 +98,7 @@ def score_case(
         latency_seconds=round(latency_seconds, 3),
         error=error,
         error_kind=classify_error(error) if error else None,
+        answer=outcome.hypothesis if outcome is not None else None,
     )
 
 
