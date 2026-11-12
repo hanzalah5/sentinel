@@ -99,7 +99,7 @@ retrieve_runbooks ─► triage ─► plan_remediation ─► request_approval 
 | Ingestion | Redis Streams — consumer groups, at-least-once, dead-letter queue |
 | Observability | Langfuse (v3) + structured `structlog` logs, shared correlation ID |
 | Tooling | `uv`, `ruff`, `mypy --strict`, `pytest` |
-| Packaging / deploy | Multi-stage Docker image (non-root, no build tooling, healthcheck) + Docker Compose |
+| Packaging / deploy | Multi-stage Docker image (non-root, no build tooling, healthcheck) + Docker Compose; Cloud Run via GitHub Actions with Workload Identity Federation (API-only) |
 | CI | GitHub Actions: lint → format-check → type-check → test (Python 3.12 + 3.13); image build + container smoke test |
 
 ---
@@ -241,6 +241,18 @@ docker build -t sentinel .
 docker run --rm -p 8000:8000 --env-file .env sentinel
 ```
 
+### Deploy (Google Cloud Run)
+
+Pushing a `v*` tag runs `.github/workflows/deploy.yml`:
+
+1. it builds the image and pushes it to Artifact Registry;
+2. it deploys a Cloud Run revision (scale-to-zero, at most 2 instances);
+3. it smoke-tests the live URL: `/healthz`, `/readyz`, and a 401 for an unauthenticated call. The smoke test doesn't call Gemini.
+
+GitHub authenticates through Workload Identity Federation, limited to this repository's `main` branch and version tags, so no service-account keys exist. Both keys live in Secret Manager.
+
+The deployment is **API-only** to keep it cheap: there's no Postgres, so runbook retrieval is off and paused incidents are lost when the service scales to zero. One-time setup (`infra/bootstrap.sh`), costs, rollback and teardown are in [infra/README.md](infra/README.md).
+
 ---
 
 ## Configuration
@@ -280,7 +292,8 @@ is intentionally deferred to the iteration that first *needs* it (infra included
 - [ ] **Iteration 5 — Eval-as-CI:** a labelled incident set scoring root-cause accuracy,
       gating merges on regression.
 - [ ] **Iteration 6 — Cost routing & hardening:** cheap-model triage + frontier-model
-      reasoning, semantic cache, rate limiting, dashboard, deploy.
+      reasoning, semantic cache, rate limiting, dashboard. *Shipped so far: API-key
+      auth, a hardened container image, and an API-only Cloud Run deploy.*
 
 ---
 
@@ -315,6 +328,7 @@ src/sentinel/
     middleware.py   # CorrelationIdMiddleware
     app.py          # FastAPI factory, lifespan, endpoints
 runbooks/           # curated markdown runbooks (the RAG corpus)
+infra/              # Cloud Run bootstrap script + deployment guide
 tests/              # offline suite (fake model + fakeredis + fake retriever), keyless
 ```
 

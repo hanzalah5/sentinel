@@ -142,3 +142,9 @@ def test_openapi_documents_bearer_auth(anonymous: TestClient) -> None:
     assert spec["components"]["securitySchemes"]["HTTPBearer"]["scheme"] == "bearer"
     assert spec["paths"]["/investigate"]["post"]["security"] == [{"HTTPBearer": []}]
     assert "security" not in spec["paths"]["/healthz"]["get"]
+
+
+def test_auth_runs_before_body_validation(anonymous: TestClient) -> None:
+    """The deploy smoke test relies on this: an unauthenticated request with an invalid
+    body gets 401, never 422, so the live check proves auth without calling Gemini."""
+    assert anonymous.post("/investigate", json={}).status_code == 401

@@ -1,0 +1,94 @@
+name: Deploy
+
+# Build the image, push it to Artifact Registry and deploy the API to Cloud Run.
+# Runs on version tags (v*) and on demand. Authenticates with Workload Identity
+# Federation, so the repository holds no service-account keys. Skips cleanly until
+# the GCP_* repository variables exist (set up once with infra/bootstrap.sh).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # mint the OIDC token exchanged for short-lived GCP credentials
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false # never interrupt a deploy halfway
+
+jobs:
+  deploy:
+    if: vars.GCP_PROJECT_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      SERVICE: sentinel
+      IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/sentinel/sentinel:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push the image
+        run: |
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      # API-only deployment: no DATABASE_URL, so runbook retrieval is off and paused
+      # incidents live in memory (lost when the service scales to zero). Callers need an
+      # API key from SENTINEL_API_KEYS; max-instances caps cost.
+      - name: Deploy to Cloud Run
+        id: deploy
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --image="$IMAGE" \
+            --region="$REGION" \
+            --service-account="${{ vars.GCP_RUNTIME_SA }}" \
+            --allow-unauthenticated \
+            --min-instances=0 \
+            --max-instances=2 \
+            --cpu=1 \
+            --memory=512Mi \
+            --concurrency=20 \
+            --timeout=120 \
+            --set-env-vars="ENVIRONMENT=production,JSON_LOGS=true,LOG_LEVEL=INFO" \
+            --set-secrets="GOOGLE_API_KEY=sentinel-google-api-key:latest,SENTINEL_API_KEYS=sentinel-api-keys:latest" \
+            --labels="managed-by=github-actions,commit=${GITHUB_SHA::7}" \
+            --quiet
+          url=$(gcloud run services describe "$SERVICE" --region="$REGION" --format='value(status.url)')
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      # Checks the live service without calling Gemini, so it costs no model quota.
+      - name: Smoke test the live service
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          curl -fsS "$URL/healthz"
+          echo
+          ready=$(curl -s -o /dev/null -w '%{http_code}' "$URL/readyz")
+          echo "readyz=$ready (expect 200: API keys and Gemini key are configured)"
+          test "$ready" = "200"
+          anon=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$URL/investigate" \
+            -H 'Content-Type: application/json' -d '{}')
+          echo "unauthenticated /investigate=$anon (expect 401)"
+          test "$anon" = "401"
+          {
+            echo "### Deployed \`${GITHUB_SHA::7}\` to Cloud Run"
+            echo ""
+            echo "- URL: $URL"
+            echo "- /healthz 200, /readyz $ready, unauthenticated /investigate $anon"
+          } >> "$GITHUB_STEP_SUMMARY"
