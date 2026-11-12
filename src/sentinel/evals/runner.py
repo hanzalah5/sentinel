@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sentinel.contracts import Alert
 from sentinel.evals.dataset import EvalCase
 from sentinel.evals.scoring import (
+    PROVIDER_ERROR_KINDS,
     CaseResult,
     InvestigationOutcome,
     Metrics,
@@ -62,6 +63,31 @@ class RequestPacer:
             self._next_start = max(self._clock(), self._next_start) + self._interval
 
 
+class ProviderBreaker:
+    """Stops a run after ``threshold`` consecutive provider failures (overload or quota).
+
+    On a free tier, every attempt against an overloaded model still counts against the
+    daily quota. Once the provider is clearly failing, the remaining cases are recorded
+    as not run instead of spending the rest of the day's requests. ``threshold=0``
+    disables it.
+    """
+
+    def __init__(self, threshold: int) -> None:
+        self._threshold = threshold
+        self._consecutive = 0
+        self._lock = threading.Lock()
+        self.tripped = False
+
+    def record(self, result: CaseResult) -> None:
+        with self._lock:
+            if result.error_kind in PROVIDER_ERROR_KINDS:
+                self._consecutive += 1
+            elif result.error_kind != "not_run":
+                self._consecutive = 0
+            if self._threshold and self._consecutive >= self._threshold:
+                self.tripped = True
+
+
 class EvalReport(BaseModel):
     """Everything needed to reproduce and compare a run."""
 
@@ -102,15 +128,29 @@ def run_cases(
     *,
     concurrency: int = 2,
     pacer: RequestPacer | None = None,
+    stop_after_provider_errors: int = 0,
     clock: Callable[[], float] = time.perf_counter,
 ) -> list[CaseResult]:
     """Investigate every case (in parallel) and score it. Results keep the input order.
 
-    A case that raises is recorded as an error and scored as wrong; it never aborts the
-    run, so one flaky call cannot hide the rest of the results.
+    A case that raises is recorded as an error and scored as wrong; one flaky call never
+    hides the rest of the results. Only a streak of provider failures stops the run
+    early (see ``ProviderBreaker``); the cases it skips are recorded as ``not_run``.
     """
+    breaker = ProviderBreaker(stop_after_provider_errors)
 
-    def run_one(case: EvalCase) -> CaseResult:
+    def attempt(case: EvalCase) -> CaseResult:
+        if breaker.tripped:
+            return score_case(
+                case,
+                None,
+                0.0,
+                error=(
+                    f"not run: stopped after {stop_after_provider_errors} consecutive "
+                    "provider errors, to save quota"
+                ),
+                error_kind="not_run",
+            )
         if pacer is not None:
             pacer.wait()  # pacing time is not counted as latency
         start = clock()
@@ -120,6 +160,11 @@ def run_cases(
             error = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_CHARS]
             return score_case(case, None, clock() - start, error=error)
         return score_case(case, outcome, clock() - start)
+
+    def run_one(case: EvalCase) -> CaseResult:
+        result = attempt(case)
+        breaker.record(result)
+        return result
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         return list(pool.map(run_one, cases))
@@ -148,6 +193,7 @@ def evaluate(
     rag_enabled: bool,
     concurrency: int = 2,
     requests_per_minute: float | None = None,
+    stop_after_provider_errors: int = 0,
 ) -> EvalReport:
     """Run, score and aggregate ``cases`` into a report."""
     started_at = datetime.now(UTC)
@@ -157,6 +203,7 @@ def evaluate(
         investigate,
         concurrency=concurrency,
         pacer=RequestPacer(requests_per_minute),
+        stop_after_provider_errors=stop_after_provider_errors,
     )
     return EvalReport(
         split=split,

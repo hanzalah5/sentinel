@@ -8,6 +8,12 @@ from sentinel.evals.scoring import describe_errors
 # The table shows the start of each error; the results JSON keeps the full text.
 _ERROR_PREVIEW = 160
 
+_PROVIDER_LABELS = {
+    "rate_limited": "rate-limited (quota)",
+    "unavailable": "unavailable (provider overloaded)",
+    "not_run": "not run (stopped early to save quota)",
+}
+
 
 def _pct(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.1%}"
@@ -17,6 +23,11 @@ def render_markdown(report: EvalReport, failures: list[str] | None = None) -> st
     """A compact summary, per-category accuracy, and every missed case."""
     m = report.metrics
     errors_detail = f": {describe_errors(m)}" if m.errors else ""
+    provider = ", ".join(
+        f"{m.errors_by_kind[kind]} {label}"
+        for kind, label in _PROVIDER_LABELS.items()
+        if m.errors_by_kind.get(kind)
+    )
     lines = [
         f"## Sentinel eval: `{report.split}` split",
         "",
@@ -26,11 +37,11 @@ def render_markdown(report: EvalReport, failures: list[str] | None = None) -> st
         "",
         *(
             [
-                f"> **{m.errors_by_kind['rate_limited']} case(s) were rate-limited by the API.** "
-                "Those scores measure quota, not the agent. Lower `--rpm` or retry later.",
+                f"> **Provider problems: {provider}.** These cases measure the model "
+                "provider, not the agent. Retry later.",
                 "",
             ]
-            if m.errors_by_kind.get("rate_limited")
+            if provider
             else []
         ),
         "| Metric | Value |",

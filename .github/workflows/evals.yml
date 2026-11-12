@@ -8,7 +8,9 @@ name: Evals
 # - A weekly run reports the held-out test split.
 # - Run manually from the Actions tab for either split.
 # - Cases run one at a time, paced to EVAL_RPM starts per minute (repository variable,
-#   default 4), with few retries so an exhausted daily quota fails fast.
+#   default 4), with no retries: each case is exactly one model request, at most 12 a run.
+# - After 2 consecutive provider errors (overload or quota) the run stops and records the
+#   remaining cases as not run, so a bad provider day doesn't spend the day's quota.
 
 on:
   pull_request:
@@ -62,7 +64,7 @@ jobs:
       EVAL_SPLIT: ${{ github.event_name == 'schedule' && 'test' || inputs.split || 'dev' }}
       JSON_LOGS: "false"
       LOG_LEVEL: WARNING
-      LLM_MAX_RETRIES: "2"
+      LLM_MAX_RETRIES: "0"
       EVAL_RPM: ${{ vars.EVAL_RPM || '4' }}
       LLM_TIMEOUT_SECONDS: "60"
     steps:
@@ -112,7 +114,7 @@ jobs:
           gate=()
           if [ -f evals/baseline.json ]; then gate=(--gate evals/baseline.json); fi
           uv run python -m sentinel.evals run --split "$EVAL_SPLIT" --out eval-results \
-            --concurrency 1 --rpm "$EVAL_RPM" "${gate[@]}"
+            --concurrency 1 --rpm "$EVAL_RPM" --stop-after-provider-errors 2 "${gate[@]}"
 
       - name: Upload results
         if: always() && steps.key.outputs.present == 'true'

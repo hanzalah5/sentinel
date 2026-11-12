@@ -20,9 +20,14 @@ from sentinel.evals.dataset import EvalCase
 
 TOP_K = 3
 
-ErrorKind = Literal["rate_limited", "timeout", "other"]
+ErrorKind = Literal["rate_limited", "unavailable", "timeout", "not_run", "other"]
+
+# Failures caused by the model provider rather than the agent. A run of these in a row
+# means the provider is overloaded or out of quota, so carrying on only burns quota.
+PROVIDER_ERROR_KINDS: frozenset[str] = frozenset({"rate_limited", "unavailable"})
 
 _RATE_LIMITED = re.compile(r"\b429\b|RESOURCE_EXHAUSTED|quota", re.IGNORECASE)
+_UNAVAILABLE = re.compile(r"\b503\b|\bUNAVAILABLE\b|high demand|overloaded", re.IGNORECASE)
 _TIMEOUT = re.compile(r"\b504\b|DEADLINE_EXCEEDED|timed? ?out", re.IGNORECASE)
 
 
@@ -30,6 +35,8 @@ def classify_error(error: str) -> ErrorKind:
     """Bucket a failure so API quota or latency problems can't pass for model quality."""
     if _RATE_LIMITED.search(error):
         return "rate_limited"
+    if _UNAVAILABLE.search(error):
+        return "unavailable"
     if _TIMEOUT.search(error):
         return "timeout"
     return "other"
@@ -70,6 +77,7 @@ def score_case(
     outcome: InvestigationOutcome | None,
     latency_seconds: float,
     error: str | None = None,
+    error_kind: ErrorKind | None = None,
 ) -> CaseResult:
     """Score one case. A failed investigation (``outcome is None``) scores as wrong."""
     if outcome is None:
@@ -97,7 +105,7 @@ def score_case(
         citation_hit=None if expected_runbook is None else expected_runbook in cited,
         latency_seconds=round(latency_seconds, 3),
         error=error,
-        error_kind=classify_error(error) if error else None,
+        error_kind=(error_kind or classify_error(error)) if error else None,
         answer=outcome.hypothesis if outcome is not None else None,
     )
 

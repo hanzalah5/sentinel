@@ -62,6 +62,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         rag_enabled=settings.rag_enabled,
         concurrency=args.concurrency,
         requests_per_minute=args.rpm or None,
+        stop_after_provider_errors=args.stop_after_provider_errors,
     )
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -118,6 +119,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.1,
         help="fail the run above this error rate when no baseline is given (default 0.1)",
+    )
+    run.add_argument(
+        "--stop-after-provider-errors",
+        type=int,
+        default=2,
+        help="skip the remaining cases after this many consecutive overload/quota errors "
+        "(default 2; 0 = never stop)",
     )
     run.set_defaults(handler=_cmd_run)
     return parser

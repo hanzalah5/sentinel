@@ -498,6 +498,13 @@ def test_cli_run_without_a_baseline_still_fails_when_most_cases_error(
 
 # --------------------------------------------------------------------------- free-tier support
 
+# Verbatim shape of the 12 Nov failure: Google's capacity error for gemini-3.8-flash.
+_OVERLOADED_503 = (
+    "ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is "
+    "currently experiencing high demand. Spikes in demand are usually temporary. Please "
+    "try again later.', 'status': 'UNAVAILABLE'}}"
+)
+
 _QUOTA_429 = (
     "ChatGoogleGenerativeAIError: Error calling model 'gemini-3.8-flash' (RESOURCE_EXHAUSTED): "
     "429 RESOURCE_EXHAUSTED. You exceeded your current quota"
@@ -511,6 +518,7 @@ _QUOTA_429 = (
         ("504 DEADLINE_EXCEEDED. Deadline expired before operation could complete.", "timeout"),
         ("ReadTimeout: timed out", "timeout"),
         ("404 NOT_FOUND: model is no longer available", "other"),
+        (_OVERLOADED_503, "unavailable"),
     ],
 )
 def test_classify_error(error: str, kind: str) -> None:
@@ -534,7 +542,7 @@ def test_report_flags_rate_limiting_and_keeps_errors_short() -> None:
     results = [score_case(_case("a"), None, 1.0, error=_QUOTA_429 + " x" * 500)]
     report = _report().model_copy(update={"results": results, "metrics": aggregate(results)})
     md = render_markdown(report)
-    assert "1 case(s) were rate-limited by the API" in md
+    assert "Provider problems: 1 rate-limited (quota)." in md
     assert "| Errors | 1 (100.0%): 1 rate_limited |" in md
     assert "x " * 100 not in md  # only a preview in the table; the JSON keeps the full text
 
@@ -598,3 +606,105 @@ def test_cli_run_accepts_a_pace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     argv = ["run", "--dataset-dir", str(DATASETS), "--out", str(tmp_path), "--limit", "2"]
     assert cli.main([*argv, "--concurrency", "1", "--rpm", "6000"]) == 0
+
+
+# --------------------------------------------------------------------------- provider breaker
+
+
+def _flaky(script: list[str | None]) -> tuple[Investigate, list[str]]:
+    """An investigator that fails per ``script`` (error text) or answers correctly (None),
+    one entry per call, and records which alerts it was actually called for."""
+    calls: list[str] = []
+
+    def investigate(alert: Alert) -> InvestigationOutcome:
+        error = script[len(calls)]
+        calls.append(alert.alert_id)
+        if error is not None:
+            raise RuntimeError(error)
+        return _outcome(IncidentCategory.db_pool_saturation)
+
+    return investigate, calls
+
+
+def test_breaker_stops_a_run_when_the_provider_is_overloaded() -> None:
+    """Replays 12 Nov: every call was a 503. Two attempts, then the rest are not run, so
+    only 2 requests are spent instead of the whole day's quota."""
+    cases = [_case(f"c{i}") for i in range(12)]
+    investigate, calls = _flaky([_OVERLOADED_503] * 12)
+
+    results = run_cases(cases, investigate, concurrency=1, stop_after_provider_errors=2)
+
+    assert calls == ["c0", "c1"]
+    assert [r.error_kind for r in results] == ["unavailable"] * 2 + ["not_run"] * 10
+    assert aggregate(results).errors_by_kind == {"not_run": 10, "unavailable": 2}
+
+
+def test_breaker_counts_quota_errors_and_resets_on_success() -> None:
+    cases = [_case(f"c{i}") for i in range(5)]
+    investigate, calls = _flaky([_OVERLOADED_503, None, _QUOTA_429, _OVERLOADED_503, None])
+
+    results = run_cases(cases, investigate, concurrency=1, stop_after_provider_errors=2)
+
+    # 503 then success (streak reset); 429 + 503 trips the breaker; the last case is skipped.
+    assert calls == ["c0", "c1", "c2", "c3"]
+    assert results[4].error_kind == "not_run"
+
+
+def test_breaker_ignores_errors_that_are_not_the_providers() -> None:
+    cases = [_case(f"c{i}") for i in range(4)]
+    investigate, calls = _flaky(["504 DEADLINE_EXCEEDED", "ValueError: bad output"] * 2)
+
+    run_cases(cases, investigate, concurrency=1, stop_after_provider_errors=2)
+
+    assert len(calls) == 4  # timeouts and agent errors never stop the run
+
+
+def test_breaker_disabled_attempts_every_case() -> None:
+    cases = [_case(f"c{i}") for i in range(4)]
+    investigate, calls = _flaky([_OVERLOADED_503] * 4)
+    run_cases(cases, investigate, concurrency=1, stop_after_provider_errors=0)
+    assert len(calls) == 4
+
+
+def test_skipped_cases_do_not_wait_for_a_pacing_slot() -> None:
+    waits: list[int] = []
+
+    class CountingPacer(RequestPacer):
+        def wait(self) -> None:
+            waits.append(1)
+
+    cases = [_case(f"c{i}") for i in range(6)]
+    investigate, _ = _flaky([_OVERLOADED_503] * 6)
+    run_cases(
+        cases, investigate, concurrency=1, pacer=CountingPacer(None), stop_after_provider_errors=2
+    )
+    assert len(waits) == 2
+
+
+def test_report_explains_an_early_stop() -> None:
+    cases = [_case(f"c{i}") for i in range(5)]
+    investigate, _ = _flaky([_OVERLOADED_503] * 5)
+    results = run_cases(cases, investigate, concurrency=1, stop_after_provider_errors=2)
+    report = _report().model_copy(update={"results": results, "metrics": aggregate(results)})
+    md = render_markdown(report)
+    assert (
+        "Provider problems: 2 unavailable (provider overloaded), "
+        "3 not run (stopped early to save quota)." in md
+    )
+
+
+def test_cli_stops_early_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    investigate, calls = _flaky([_OVERLOADED_503] * 12)
+    monkeypatch.setattr(cli, "get_settings", _ready_settings)
+    monkeypatch.setattr(cli, "build_live_investigator", lambda settings: investigate)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    code = cli.main(
+        ["run", "--dataset-dir", str(DATASETS), "--out", str(tmp_path), "--concurrency", "1"]
+    )
+
+    assert code == 1
+    assert len(calls) == 2
+    assert "10 not_run" in capsys.readouterr().out
