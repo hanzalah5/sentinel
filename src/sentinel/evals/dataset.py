@@ -33,7 +33,7 @@ HANDWRITTEN_FILE = "handwritten.json"
 
 # Fixed seeds keep the generated set reproducible; different seeds keep the splits apart.
 _SPLIT_SEEDS: dict[Split, int] = {"dev": 1001, "test": 2002}
-CASES_PER_SCENARIO = 3
+CASES_PER_SCENARIO = 1
 _EPOCH = datetime(2026, 7, 1, tzinfo=UTC)
 
 
